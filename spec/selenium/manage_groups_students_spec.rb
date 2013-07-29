@@ -2,14 +2,14 @@ require File.expand_path(File.dirname(__FILE__) + '/helpers/manage_groups_common
 require 'thread'
 
 describe "manage groups students" do
-  it_should_behave_like "manage groups selenium tests"
+  it_should_behave_like "in-process server selenium tests"
 
   before (:each) do
     course_with_teacher_logged_in
   end
 
   context "misc" do
-    it "should click on  the self signup help link " do
+    it "should click on the self signup help link " do
       @student = @course.enroll_student(user_model(:name => "John Doe")).user
       get "/courses/#{@course.id}/groups"
       f(".add_category_link").click
@@ -271,27 +271,29 @@ describe "manage groups students" do
     it "should add multiple groups and be sure they are all deleted" do
       add_groups_in_category @courses_group_category
       get "/courses/#{@course.id}/groups"
-      delete = f(".delete_category_link")
-      delete.click
+      driver.execute_script("$('.delete_category_link').click()")
       confirm_dialog = driver.switch_to.alert
       confirm_dialog.accept
-      wait_for_ajaximations
       ff(".left_side .group").should be_empty
       @course.group_categories.all.count.should == 0
     end
 
     it "should edit an individual group" do
       get "/courses/#{@course.id}/groups"
-      group = add_group_to_category @courses_group_category, "group 1"
+      group = add_group_to_category(@courses_group_category, "group 1")
+      group.should_not be_nil
       f("#group_#{group.id}").click
+      wait_for_ajaximations
       f("#group_#{group.id} .edit_group_link").click
+      wait_for_ajaximations
       name = "new group 1"
       f("#group_name").send_keys(name)
       submit_form("#edit_group_form")
       wait_for_ajaximations
-      new_group = @course.groups.find_by_name(name)
+      group = @course.groups.find_by_name(name)
       group.should_not be_nil
     end
+
 
     it "should delete an individual group" do
       get "/courses/#{@course.id}/groups"
@@ -360,28 +362,28 @@ describe "manage groups students" do
       assert_flash_error_message /Nothing to do/
     end
 
-    it "should give 'Students assigned to groups.' success flash otherwise" do
+    it "should give Students assigned to groups. success flash otherwise" do
       assign_students(@category)
       assert_flash_notice_message /Students assigned to groups/
     end
 
-    it "should give 'Assigning Students...' visual feedback" do
-      pending "causes whatever spec follows this to fail even in different files"
-        assign_students = fj("#category_#{@category.id} .assign_students_link:visible")
-        assign_students.should_not be_nil
-        assign_students.click
-        # Do some magic to make sure the next ajax request doesn't complete until we're ready for it to
-        lock = Mutex.new
-        lock.lock
-        GroupsController.before_filter { lock.lock; lock.unlock; true }
-        confirm_dialog = driver.switch_to.alert
-        confirm_dialog.accept
-        loading = fj("#category_#{@category.id} .group_blank .loading_members:visible")
-        loading.text.should == 'Assigning Students...'
-        lock.unlock
-        GroupsController.filter_chain.pop
-        # make sure we wait before moving on
-        wait_for_ajax_requests
-      end
+    it "should give Assigning Students... visual feedback" do
+      #pending "causes whatever spec follows this to fail even in different files"
+      assign_students = fj("#category_#{@category.id} .assign_students_link:visible")
+      assign_students.should_not be_nil
+      assign_students.click
+      # Do some magic to make sure the next ajax request doesn't complete until we're ready for it to
+      lock = Mutex.new
+      lock.lock
+      GroupsController.before_filter { lock.lock; lock.unlock; true }
+      confirm_dialog = driver.switch_to.alert
+      confirm_dialog.accept
+      loading = fj("#category_#{@category.id} .group_blank .loading_members:visible")
+      loading.text.should == 'Assigning Students...'
+      lock.unlock
+      GroupsController.filter_chain.pop
+      # make sure we wait before moving on
+      wait_for_ajax_requests
     end
   end
+end

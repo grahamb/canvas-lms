@@ -29,7 +29,7 @@ describe ContextModule do
       course_with_teacher_logged_in(:active_all => true)
       context_module = @course.context_modules.create!
       content_tag = context_module.add_item :type => 'context_module_sub_header', :title => "My Sub Header Title"
-      ContextModule.update_all({ :updated_at => 1.hour.ago }, { :id => context_module.id })
+      ContextModule.where(:id => context_module).update_all(:updated_at => 1.hour.ago)
       get "/courses/#{@course.id}/modules"
       response.body.should match(/My Sub Header Title/)
 
@@ -112,7 +112,7 @@ describe ContextModule do
         get @test_url
         response.should be_success
         html = Nokogiri::HTML(response.body)
-        html.css('#test_content').length.should == 0
+        html.css('#test_content').length.should == (@test_content_length || 0)
     
         p1 = @mod1.evaluate_for(@user, true, true)
     
@@ -161,6 +161,7 @@ describe ContextModule do
           discussion = @course.discussion_topics.create!(:title => "topic", :message => content)
           @test_url = "/courses/#{@course.id}/discussion_topics/#{discussion.id}"
           @tag2 = @mod2.add_item(:type => 'discussion_topic', :id => discussion.id)
+          @test_content_length = 1
         end
       end
     end

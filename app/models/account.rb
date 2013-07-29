@@ -22,7 +22,7 @@ class Account < ActiveRecord::Base
     :turnitin_shared_secret, :turnitin_comments, :turnitin_pledge,
     :default_time_zone, :parent_account, :settings, :default_storage_quota,
     :default_storage_quota_mb, :storage_quota, :ip_filters, :default_locale,
-    :default_user_storage_quota_mb
+    :default_user_storage_quota_mb, :default_group_storage_quota_mb
 
   include Workflow
   belongs_to :parent_account, :class_name => 'Account'
@@ -46,10 +46,7 @@ class Account < ActiveRecord::Base
   has_many :users, :through => :account_users
   has_many :pseudonyms, :include => :user
   has_many :role_overrides, :as => :context
-  has_many :rubrics, :as => :context
-  has_many :rubric_associations, :as => :context, :include => :rubric, :dependent => :destroy
   has_many :course_account_associations
-  has_many :associated_courses, :through => :course_account_associations, :source => :course, :select => 'DISTINCT courses.*'
   has_many :child_courses, :through => :course_account_associations, :source => :course, :conditions => ['course_account_associations.depth = 0']
   has_many :attachments, :as => :context, :dependent => :destroy
   has_many :active_assignments, :as => :context, :class_name => 'Assignment', :conditions => ['assignments.workflow_state != ?', 'deleted']
@@ -59,11 +56,12 @@ class Account < ActiveRecord::Base
   has_many :active_folders_detailed, :class_name => 'Folder', :as => :context, :include => [:active_sub_folders, :active_file_attachments], :conditions => ['folders.workflow_state != ?', 'deleted'], :order => 'folders.name'
   has_many :account_authorization_configs, :order => "position"
   has_many :account_reports
-  has_many :grading_standards, :as => :context
+  has_many :grading_standards, :as => :context, :conditions => ['workflow_state != ?', 'deleted']
   has_many :assessment_questions, :through => :assessment_question_banks
   has_many :assessment_question_banks, :as => :context, :include => [:assessment_questions, :assessment_question_bank_users]
   has_many :roles
   has_many :all_roles, :class_name => 'Role', :foreign_key => 'root_account_id'
+  has_many :progresses, :as => :context
   def inherited_assessment_question_banks(include_self = false, *additional_contexts)
     sql = []
     conds = []
@@ -74,16 +72,16 @@ class Account < ActiveRecord::Base
       conds += [c.class.to_s, c.id]
     }
     conds.unshift(sql.join(" OR "))
-    AssessmentQuestionBank.scoped :conditions => conds
+    AssessmentQuestionBank.where(conds)
   end
   
   include LearningOutcomeContext
+  include RubricContext
 
   has_many :context_external_tools, :as => :context, :dependent => :destroy, :order => 'name'
   has_many :error_reports
   has_many :announcements, :class_name => 'AccountNotification'
   has_many :alerts, :as => :context, :include => :criteria
-  has_many :associated_alerts, :through => :associated_courses, :source => :alerts, :include => :criteria
   has_many :user_account_associations
   has_many :report_snapshots
 
@@ -94,8 +92,6 @@ class Account < ActiveRecord::Base
   after_create :default_enrollment_term
   
   serialize :settings, Hash
-
-  scopes_custom_fields
 
   validates_locale :default_locale, :allow_nil => true
   validate :account_chain_loop, :if => :parent_account_id_changed?
@@ -137,6 +133,7 @@ class Account < ActiveRecord::Base
   add_setting :error_reporting, :hash => true, :values => [:action, :email, :url, :subject_param, :body_param], :root_only => true
   add_setting :custom_help_links, :root_only => true
   add_setting :prevent_course_renaming_by_teachers, :boolean => true, :root_only => true
+  add_setting :restrict_student_future_view, :boolean => true, :root_only => true, :default => false
   add_setting :teachers_can_create_courses, :boolean => true, :root_only => true, :default => false
   add_setting :students_can_create_courses, :boolean => true, :root_only => true, :default => false
   add_setting :no_enrollments_can_create_courses, :boolean => true, :root_only => true, :default => false
@@ -150,13 +147,25 @@ class Account < ActiveRecord::Base
   add_setting :users_can_edit_name, :boolean => true, :root_only => true
   add_setting :open_registration, :boolean => true, :root_only => true
   add_setting :enable_scheduler, :boolean => true, :root_only => true, :default => false
+  add_setting :enable_draft, :boolean => true, :root_only => true, :default => false
   add_setting :calendar2_only, :boolean => true, :root_only => true, :default => false
   add_setting :show_scheduler, :boolean => true, :root_only => true, :default => false
   add_setting :enable_profiles, :boolean => true, :root_only => true, :default => false
   add_setting :mfa_settings, :root_only => true
   add_setting :canvas_authentication, :boolean => true, :root_only => true
   add_setting :admins_can_change_passwords, :boolean => true, :root_only => true, :default => false
+  add_setting :admins_can_view_notifications, :boolean => true, :root_only => true, :default => false
   add_setting :outgoing_email_default_name
+  add_setting :external_notification_warning, :boolean => true, :default => false
+  # When a user is invited to a course, do we let them see a preview of the
+  # course even without registering?  This is part of the free-for-teacher
+  # account perks, since anyone can invite anyone to join any course, and it'd
+  # be nice to be able to see the course first if you weren't expecting the
+  # invitation.
+  add_setting :allow_invitation_previews, :boolean => true, :root_only => true, :default => false
+  add_setting :self_registration, :boolean => true, :root_only => true, :default => false
+  add_setting :large_course_rosters, :boolean => true, :root_only => true, :default => false
+  add_setting :edit_institution_email, :boolean => true, :root_only => true, :default => true
 
   def settings=(hash)
     if hash.is_a?(Hash)
@@ -212,6 +221,10 @@ class Account < ActiveRecord::Base
     !!settings[:open_registration] && canvas_authentication?
   end
 
+  def self_registration?
+    !!settings[:self_registration] && canvas_authentication?
+  end
+
   def ip_filters=(params)
     filters = {}
     require 'ipaddr'
@@ -233,8 +246,9 @@ class Account < ActiveRecord::Base
   
   def ensure_defaults
     self.uuid ||= AutoHandle.generate_securish_uuid
+    self.lti_guid ||= self.uuid if self.respond_to?(:lti_guid)
   end
-  
+
   def verify_unique_sis_source_id
     return true unless self.sis_source_id
     if self.root_account?
@@ -280,7 +294,7 @@ class Account < ActiveRecord::Base
   def settings
     result = self.read_attribute(:settings)
     return result if result
-    return self.write_attribute(:settings, {}) unless frozen?
+    return write_attribute(:settings, {}) unless frozen?
     {}.freeze
   end
   
@@ -313,10 +327,18 @@ class Account < ActiveRecord::Base
     end
     res
   end
-  
+
+  def users_visible_to(user)
+    self.grants_right?(user, nil, :read) ? self.all_users : self.all_users.where("?", false)
+  end
+
   def users_name_like(query="")
     @cached_users_name_like ||= {}
     @cached_users_name_like[query] ||= self.fast_all_users.name_like(query)
+  end
+
+  def associated_courses
+    Course.shard(shard).where("EXISTS (SELECT 1 FROM course_account_associations WHERE course_id=courses.id AND account_id=?)", self)
   end
 
   def fast_course_base(opts)
@@ -325,7 +347,7 @@ class Account < ActiveRecord::Base
     associated_courses = associated_courses.with_enrollments if opts[:hide_enrollmentless_courses]
     associated_courses = associated_courses.for_term(opts[:term]) if opts[:term].present?
     associated_courses = yield associated_courses if block_given?
-    associated_courses.limit(opts[:limit]).active_first.find(:all, :select => columns, :group => columns)
+    associated_courses.limit(opts[:limit]).active_first.select(columns).all
   end
 
   def fast_all_courses(opts={})
@@ -335,23 +357,20 @@ class Account < ActiveRecord::Base
 
   def all_users(limit=250)
     @cached_all_users ||= {}
-    @cached_all_users[limit] ||= User.of_account(self).scoped(:limit=>limit)
+    @cached_all_users[limit] ||= User.of_account(self).limit(limit)
   end
   
   def fast_all_users(limit=nil)
     @cached_fast_all_users ||= {}
-    @cached_fast_all_users[limit] ||= self.all_users(limit).active.order_by_sortable_name.scoped(:select => "users.id, users.name, users.sortable_name")
+    @cached_fast_all_users[limit] ||= self.all_users(limit).active.select("users.id, users.name, users.sortable_name").order_by_sortable_name
   end
 
   def users_not_in_groups_sql(groups, opts={})
-    ["SELECT u.id, u.name
-        FROM users u
-       INNER JOIN user_account_associations uaa on uaa.user_id = u.id
-       WHERE uaa.account_id = ? AND u.workflow_state != 'deleted'
-             #{"AND NOT EXISTS (SELECT *
-                                  FROM group_memberships gm
-                                 WHERE gm.user_id = u.id AND
-                                       gm.group_id IN (#{groups.map(&:id).join ','}))" unless groups.empty?}
+    ["SELECT users.id, users.name
+        FROM users
+       INNER JOIN user_account_associations uaa on uaa.user_id = users.id
+       WHERE uaa.account_id = ? AND users.workflow_state != 'deleted'
+       #{Group.not_in_group_sql_fragment(groups)}
        #{"ORDER BY #{opts[:order_by]}" if opts[:order_by].present?}", self.id]
   end
 
@@ -360,7 +379,7 @@ class Account < ActiveRecord::Base
   end
   
   def paginate_users_not_in_groups(groups, page, per_page = 15)
-    User.paginate_by_sql(users_not_in_groups_sql(groups, :order_by => "#{User.sortable_name_order_by_clause('u')} ASC"),
+    User.paginate_by_sql(users_not_in_groups_sql(groups, :order_by => "#{User.sortable_name_order_by_clause('users')} ASC"),
                          :page => page, :per_page => per_page)
   end
 
@@ -370,8 +389,14 @@ class Account < ActiveRecord::Base
     @cached_courses_name_like[[query, opts]] ||= self.fast_course_base(opts) {|q| q.name_like(query)}
   end
 
+  def self_enrollment_course_for(code)
+    all_courses.
+      where(:self_enrollment_code => code).
+      first
+  end
+
   def file_namespace
-    "account_#{self.root_account.id}"
+    Shard.birth.activate { "account_#{self.root_account.id}" }
   end
   
   def self.account_lookup_cache_key(id)
@@ -436,6 +461,25 @@ class Account < ActiveRecord::Base
     self.default_user_storage_quota = val.try(:to_i).try(:megabytes)
   end
 
+  def default_group_storage_quota
+    read_attribute(:default_group_storage_quota) ||
+        Group.default_storage_quota
+  end
+
+  def default_group_storage_quota=(val)
+    val = val.to_i
+    val = nil if val == Group.default_storage_quota || val <= 0
+    write_attribute(:default_group_storage_quota, val)
+  end
+
+  def default_group_storage_quota_mb
+    default_group_storage_quota / 1.megabyte
+  end
+
+  def default_group_storage_quota_mb=(val)
+    self.default_group_storage_quota = val.try(:to_i).try(:megabytes)
+  end
+
   def turnitin_shared_secret=(secret)
     return if secret.blank?
     self.turnitin_crypted_secret, self.turnitin_salt = Canvas::Security.encrypt_password(secret, 'instructure_turnitin_secret_shared')
@@ -445,19 +489,21 @@ class Account < ActiveRecord::Base
     return nil unless self.turnitin_salt && self.turnitin_crypted_secret
     Canvas::Security.decrypt_password(self.turnitin_crypted_secret, self.turnitin_salt, 'instructure_turnitin_secret_shared')
   end
-  
+
   def account_chain(opts = {})
     res = [self]
 
-    if ActiveRecord::Base.configurations[RAILS_ENV]['adapter'] == 'postgresql'
-      res.concat Account.find_by_sql(<<-SQL) if self.parent_account_id
-          WITH RECURSIVE t AS (
-            SELECT * FROM accounts WHERE id=#{self.parent_account_id}
-            UNION
-            SELECT accounts.* FROM accounts INNER JOIN t ON accounts.id=t.parent_account_id
-          )
-          SELECT * FROM t
-        SQL
+    if ActiveRecord::Base.configurations[Rails.env]['adapter'] == 'postgresql'
+      self.shard.activate do
+        res.concat Account.find_by_sql(<<-SQL) if self.parent_account_id
+            WITH RECURSIVE t AS (
+              SELECT * FROM accounts WHERE id=#{self.parent_account_id}
+              UNION
+              SELECT accounts.* FROM accounts INNER JOIN t ON accounts.id=t.parent_account_id
+            )
+            SELECT * FROM t
+          SQL
+      end
     else
       account = self
       while account.parent_account
@@ -480,6 +526,34 @@ class Account < ActiveRecord::Base
     end
   end
 
+  # returns all sub_accounts recursively as far down as they go, in id order
+  # because this uses a custom sql query for postgresql, we can't use a normal
+  # named scope, so we pass the limit and offset into the method instead and
+  # build our own query string
+  def sub_accounts_recursive(limit, offset)
+    if ActiveRecord::Base.configurations[Rails.env]['adapter'] == 'postgresql'
+      Account.find_by_sql([<<-SQL, self.id, limit.to_i, offset.to_i])
+          WITH RECURSIVE t AS (
+            SELECT * FROM accounts
+            WHERE parent_account_id = ? AND workflow_state <>'deleted'
+            UNION
+            SELECT accounts.* FROM accounts
+            INNER JOIN t ON accounts.parent_account_id = t.id
+            WHERE accounts.workflow_state <>'deleted'
+          )
+          SELECT * FROM t ORDER BY parent_account_id, id LIMIT ? OFFSET ?
+      SQL
+    else
+      account_descendents = lambda do |id|
+        as = Account.where(:parent_account_id => id).active.order(:id)
+        as.empty? ?
+          [] :
+          as << as.map { |a| account_descendents.call(a.id) }
+      end
+      account_descendents.call(id).flatten[offset, limit]
+    end
+  end
+
   def associated_accounts
     self.account_chain
   end
@@ -493,42 +567,43 @@ class Account < ActiveRecord::Base
     self.account_users.find_by_user_id(user && user.id)
   end
 
-  def account_membership_types
-    res = ['AccountAdmin']
-    res += self.parent_account.account_membership_types if self.parent_account
-    res += (self.membership_types || "").split(",").select{|t| !t.empty? }
-    res.uniq
-  end
-  
-  def add_account_membership_type(type)
-    types = account_membership_types
-    types += type.split(",")
-    self.membership_types = types.join(',')
-    self.save
-  end
-  
-  def remove_account_membership_type(type)
-    self.membership_types = self.account_membership_types.select{|t| t != type}.join(',')
-    self.save
+  def available_custom_account_roles
+    account_roles = roles.for_accounts.active
+    account_roles |= self.parent_account.available_custom_account_roles if self.parent_account
+    account_roles
   end
 
-  def active_course_roles
-    if @course_roles.nil?
-      @course_roles = self.roles.active.map(&:name)
-      @course_roles += self.parent_account.active_course_roles if self.parent_account
-    end
+  def available_account_roles
+    account_roles = roles.for_accounts.active.map(&:name)
+    account_roles |= ['AccountAdmin']
+    account_roles |= self.parent_account.available_account_roles if self.parent_account
+    account_roles
+  end
 
-    @course_roles
+  def available_course_roles(include_inactive=false)
+    available_course_roles_by_name(include_inactive).keys
+  end
+
+  def available_course_roles_by_name(include_inactive=false)
+    scope = include_inactive ? roles.for_courses.not_deleted : roles.for_courses.active
+    role_map = {}
+    scope.each { |role| role_map[role.name] = role }
+    role_map.reverse_merge!(parent_account.available_course_roles_by_name(include_inactive)) if parent_account
+    role_map
   end
 
   def get_course_role(role_name)
-    course_role = self.roles.active.find_by_name(role_name)
+    course_role = self.roles.for_courses.not_deleted.find_by_name(role_name)
     course_role ||= self.parent_account.get_course_role(role_name) if self.parent_account
     course_role
   end
 
   def has_role?(role_name)
-    self.account_membership_types.include?(role_name) || self.active_course_roles.include?(role_name) || RoleOverride::RESERVED_ROLES.include?(role_name)
+    !!roles.not_deleted.where(:roles => { :name => role_name}).first
+  end
+
+  def find_role(role_name)
+    roles.not_deleted.find_by_name(role_name) || (parent_account && parent_account.find_role(role_name))
   end
 
   def account_authorization_config
@@ -549,7 +624,7 @@ class Account < ActiveRecord::Base
   end
   
   def self_and_all_sub_accounts
-    @self_and_all_sub_accounts ||= Account.connection.select_all("SELECT id FROM accounts WHERE accounts.root_account_id = #{self.id} OR accounts.parent_account_id = #{self.id}").map{|ref| ref['id'].to_i}.uniq + [self.id]
+    @self_and_all_sub_accounts ||= Account.where("root_account_id=? OR parent_account_id=?", self, self).pluck(:id).uniq + [self.id]
   end
   
   def default_time_zone
@@ -574,7 +649,7 @@ class Account < ActiveRecord::Base
         if account_chain_ids == [Account.site_admin.id]
           Account.site_admin.account_users_for(user)
         else
-          AccountUser.find(:all, :conditions => { :account_id => account_chain_ids, :user_id => user.id })
+          AccountUser.where(:account_id => account_chain_ids, :user_id => user).all
         end
       end
     end
@@ -586,23 +661,22 @@ class Account < ActiveRecord::Base
   def all_account_users_for(user)
     raise "must be a root account" unless self.root_account?
     Shard.partition_by_shard([self, Account.site_admin].uniq) do |accounts|
-      ids = accounts.map(&:id)
-      AccountUser.find(:all, :include => :account, :joins => :account, :conditions => ["user_id=? AND (root_account_id IN (?) OR account_id IN (?))", user.id, ids, ids])
+      AccountUser.includes(:account).joins(:account).where("user_id=? AND (root_account_id IN (?) OR account_id IN (?))", user, accounts, accounts)
     end
   end
 
   set_policy do
     enrollment_types = RoleOverride.enrollment_types.map { |role| role[:name] }
     RoleOverride.permissions.each do |permission, details|
-      given { |user| self.account_users_for(user).any? { |au| au.has_permission_to?(permission) && (!details[:if] || send(details[:if])) } }
+      given { |user| self.account_users_for(user).any? { |au| au.has_permission_to?(self, permission) && (!details[:if] || send(details[:if])) } }
       can permission
       can :create_courses if permission == :manage_courses
 
       next unless details[:account_only]
       ((details[:available_to] | details[:true_for]) & enrollment_types).each do |role|
         given { |user| user && RoleOverride.permission_for(self, permission, role)[:enabled] &&
-          self.course_account_associations.find(:first, :joins => 'INNER JOIN enrollments ON course_account_associations.course_id=enrollments.course_id',
-            :conditions => ["enrollments.type=? AND enrollments.workflow_state IN ('active', 'completed') AND user_id=?", role, user.id]) &&
+          self.course_account_associations.joins('INNER JOIN enrollments ON course_account_associations.course_id=enrollments.course_id').
+            where("enrollments.type=? AND enrollments.workflow_state IN ('active', 'completed') AND user_id=?", role, user).first &&
           (!details[:if] || send(details[:if])) }
         can permission
       end
@@ -612,21 +686,16 @@ class Account < ActiveRecord::Base
     can :read and can :manage and can :update and can :delete and can :read_outcomes
 
     given { |user|
-      root_account = self.root_account
       result = false
-      site_admin = self.site_admin?
 
-      if !site_admin && user && root_account.teachers_can_create_courses?
-        count = user.enrollments.scoped(:select=>'id', :conditions=>"enrollments.type IN ('TeacherEnrollment', 'DesignerEnrollment') AND (enrollments.workflow_state != 'deleted') AND root_account_id = #{root_account.id}").count
-        result = true if count > 0
-      end
-      if !site_admin && user && !result && root_account.students_can_create_courses?
-        count = user.enrollments.scoped(:select=>'id', :conditions=>"enrollments.type IN ('StudentEnrollment', 'ObserverEnrollment') AND (enrollments.workflow_state != 'deleted') AND root_account_id = #{root_account.id}").count
-        result = true if count > 0
-      end
-      if !site_admin && user && !result && root_account.no_enrollments_can_create_courses?
-        count = user.enrollments.scoped(:select=>'id', :conditions=>"enrollments.workflow_state != 'deleted' AND root_account_id = #{root_account.id}").count
-        result = true if count == 0
+      if !site_admin? && user
+        scope = user.enrollments.where(:root_account_id => root_account).where("enrollments.workflow_state<>'deleted'")
+        result = root_account.teachers_can_create_courses? &&
+            scope.where(:type => ['TeacherEnrollment', 'DesignerEnrollment']).exists?
+        result ||= root_account.students_can_create_courses? &&
+            scope.where(:type => ['StudentEnrollment', 'ObserverEnrollment']).exists?
+        result ||= root_account.no_enrollments_can_create_courses? &&
+            !scope.exists?
       end
 
       result
@@ -674,17 +743,20 @@ class Account < ActiveRecord::Base
   end
   
   def context_code
-    raise "DONT USE THIS, use .short_name instead" unless ENV['RAILS_ENV'] == "production"
+    raise "DONT USE THIS, use .short_name instead" unless Rails.env.production?
   end
   
   def short_name
     name
   end
 
-  def email_pseudonyms
-    false
+  # can be set/overridden by plugin to enforce email pseudonyms
+  attr_accessor :email_pseudonyms
+
+  def password_policy
+    Canvas::PasswordPolicy.default_policy.merge(settings[:password_policy] || {})
   end
-  
+
   def password_authentication?
     !!(!self.account_authorization_config || self.account_authorization_config.password_authentication?)
   end
@@ -731,16 +803,7 @@ class Account < ActiveRecord::Base
       errors.add(:discovery_url, t('errors.invalid_discovery_url', "The discovery URL is not valid" ))
     end
   end
-  
-  # When a user is invited to a course, do we let them see a preview of the
-  # course even without registering?  This is part of the free-for-teacher
-  # account perks, since anyone can invite anyone to join any course, and it'd
-  # be nice to be able to see the course first if you weren't expecting the
-  # invitation.
-  def allow_invitation_previews?
-    self == Account.default
-  end
-  
+
   def find_courses(string)
     self.all_courses.select{|c| c.name.match(string) }
   end
@@ -776,7 +839,7 @@ class Account < ActiveRecord::Base
   end
 
   def self.get_special_account(special_account_type, default_account_name)
-    Shard.default.activate do
+    Shard.birth.activate do
       @special_account_ids ||= {}
       @special_accounts ||= {}
 
@@ -793,11 +856,12 @@ class Account < ActiveRecord::Base
           account = @special_accounts[special_account_type] = Account.find_by_id(special_account_id)
         end
       end
-      unless account
+      if !account && default_account_name
         # TODO i18n
         t '#account.default_site_administrator_account_name', 'Site Admin'
         t '#account.default_account_name', 'Default Account'
-        account = @special_accounts[special_account_type] = Account.create!(:name => default_account_name)
+        account = @special_accounts[special_account_type] = Account.new(:name => default_account_name)
+        account.save!
         Setting.set("#{special_account_type}_account_id", account.id)
         @special_account_ids[special_account_type] = account.id
       end
@@ -815,16 +879,39 @@ class Account < ActiveRecord::Base
 
   # Updates account associations for all the courses and users associated with this account
   def update_account_associations
-    account_chain_cache = {}
-    all_user_ids = []
-    all_user_ids += Course.update_account_associations(self.associated_courses, :skip_user_account_associations => true, :account_chain_cache => account_chain_cache)
+    self.shard.activate do
+      account_chain_cache = {}
+      all_user_ids = Set.new
 
-    # Make sure we have all users with existing account associations.
-    # (This should catch users with Pseudonyms associated with the account.)
-    all_user_ids += UserAccountAssociation.scoped(:select => 'user_id', :conditions => { :account_id => self.id }).map(&:user_id)
+      # make sure to use the non-associated_courses associations
+      # to catch courses that didn't ever have an association created
+      scopes = if root_account?
+                [all_courses,
+                 associated_courses.
+                     where("root_account_id<>?", self)]
+              else
+                [courses,
+                 associated_courses.
+                    where("courses.account_id<>?", self)]
+              end
+      # match the "batch" size in Course.update_account_associations
+      scopes.each do |scope|
+        scope.select([:id, :account_id]).find_in_batches(:batch_size => 500) do |courses|
+          Course.send(:with_exclusive_scope) do
+            all_user_ids.merge Course.update_account_associations(courses, :skip_user_account_associations => true, :account_chain_cache => account_chain_cache)
+          end
+        end
+      end
 
-    # Update the users' associations as well
-    User.update_account_associations(all_user_ids.uniq, :account_chain_cache => account_chain_cache)
+      # Make sure we have all users with existing account associations.
+      all_user_ids.merge self.user_account_associations.pluck(:user_id)
+      if root_account?
+        all_user_ids.merge self.pseudonyms.active.pluck(:user_id)
+      end
+
+      # Update the users' associations as well
+      User.update_account_associations(all_user_ids.to_a, :account_chain_cache => account_chain_cache)
+    end
   end
   
   # this will take an account and make it a sub_account of
@@ -867,7 +954,7 @@ class Account < ActiveRecord::Base
   end
   
   def turnitin_settings
-    if self.turnitin_account_id && self.turnitin_shared_secret && !self.turnitin_account_id.empty? && !self.turnitin_shared_secret.empty?
+    if self.turnitin_account_id.present? && self.turnitin_shared_secret.present?
       [self.turnitin_account_id, self.turnitin_shared_secret]
     else
       self.parent_account.turnitin_settings rescue nil
@@ -878,7 +965,7 @@ class Account < ActiveRecord::Base
     if self.turnitin_pledge && !self.turnitin_pledge.empty?
       self.turnitin_pledge
     else
-      res = self.account.turnitin_pledge rescue nil
+      res = self.parent_account.try(:closest_turnitin_pledge)
       res ||= t('#account.turnitin_pledge', "This assignment submission is my own, original work")
     end
   end
@@ -917,6 +1004,7 @@ class Account < ActiveRecord::Base
   TAB_PLUGINS = 14
   TAB_JOBS = 15
   TAB_DEVELOPER_KEYS = 16
+  TAB_ADMIN_TOOLS = 17
 
   def external_tool_tabs(opts)
     tools = ContextExternalTool.active.find_all_for(self, :account_navigation)
@@ -938,10 +1026,11 @@ class Account < ActiveRecord::Base
       tabs = []
       tabs << { :id => TAB_USERS, :label => t('#account.tab_users', "Users"), :css_class => 'users', :href => :account_users_path } if user && self.grants_right?(user, nil, :read_roster)
       tabs << { :id => TAB_PERMISSIONS, :label => t('#account.tab_permissions', "Permissions"), :css_class => 'permissions', :href => :account_permissions_path } if user && self.grants_right?(user, nil, :manage_role_overrides)
+      tabs << { :id => TAB_SUB_ACCOUNTS, :label => t('#account.tab_sub_accounts', "Sub-Accounts"), :css_class => 'sub_accounts', :href => :account_sub_accounts_path } if manage_settings
       tabs << { :id => TAB_AUTHENTICATION, :label => t('#account.tab_authentication', "Authentication"), :css_class => 'authentication', :href => :account_account_authorization_configs_path } if manage_settings
       tabs << { :id => TAB_PLUGINS, :label => t("#account.tab_plugins", "Plugins"), :css_class => "plugins", :href => :plugins_path, :no_args => true } if self.grants_right?(user, nil, :manage_site_settings)
-      tabs << { :id => TAB_JOBS, :label => t("#account.tab_jobs", "Jobs"), :css_class => "jobs", :href => :jobs_path, :no_args => true } if self.grants_right?(user, nil, :manage_jobs)
-      tabs << { :id => TAB_DEVELOPER_KEYS, :label => t("#account.tab_developer_keys", "Developer Keys"), :css_class => "developer_keys", :href => :developer_keys_path, :no_args => true } if self.grants_right?(user, nil, :manage_site_settings)
+      tabs << { :id => TAB_JOBS, :label => t("#account.tab_jobs", "Jobs"), :css_class => "jobs", :href => :jobs_path, :no_args => true } if self.grants_right?(user, nil, :view_jobs)
+      tabs << { :id => TAB_DEVELOPER_KEYS, :label => t("#account.tab_developer_keys", "Developer Keys"), :css_class => "developer_keys", :href => :developer_keys_path, :no_args => true } if self.grants_right?(user, nil, :manage_developer_keys)
     else
       tabs = []
       tabs << { :id => TAB_COURSES, :label => t('#account.tab_courses', "Courses"), :css_class => 'courses', :href => :account_path } if user && self.grants_right?(user, nil, :read_course_list)
@@ -961,8 +1050,17 @@ class Account < ActiveRecord::Base
       tabs << { :id => TAB_SIS_IMPORT, :label => t('#account.tab_sis_import', "SIS Import"), :css_class => 'sis_import', :href => :account_sis_import_path } if self.root_account? && self.allow_sis_import && user && self.grants_right?(user, nil, :manage_sis)
     end
     tabs += external_tool_tabs(opts)
+    tabs << { :id => TAB_ADMIN_TOOLS, :label => t('#account.tab_admin_tools', "Admin Tools"), :css_class => 'admin_tools', :href => :account_admin_tools_path } if can_see_admin_tools_tab?(user)
     tabs << { :id => TAB_SETTINGS, :label => t('#account.tab_settings', "Settings"), :css_class => 'settings', :href => :account_settings_path }
     tabs
+  end
+
+  def can_see_admin_tools_tab?(user)
+    return false if !user || site_admin?
+    admin_tool_permissions = RoleOverride.manageable_permissions(self).find_all{|p| p[1][:admin_tool]}
+    admin_tool_permissions.any? do |p|
+      self.grants_right?(user, nil, p.first)
+    end
   end
 
   def is_a_context?
@@ -970,7 +1068,7 @@ class Account < ActiveRecord::Base
   end
   
   def help_links
-    settings[:custom_help_links] || []
+    Canvas::Help.default_links + (settings[:custom_help_links] || [])
   end
 
   def self.allowable_services
@@ -1023,7 +1121,14 @@ class Account < ActiveRecord::Base
         :description => "",
         :default => false,
         :expose_to_ui => :setting
-      }
+      },
+      :account_survey_notifications => {
+        :name => "Account Surveys",
+        :description => "",
+        :default => false,
+        :expose_to_ui => :setting,
+        :expose_to_ui_proc => proc { |user, account| user && account && account.grants_right?(user, :manage_site_settings) },
+      },
     }.merge(@plugin_services || {}).freeze
   end
 
@@ -1098,14 +1203,14 @@ class Account < ActiveRecord::Base
 
   # if expose_as is nil, all services exposed in the ui are returned
   # if it's :service or :setting, then only services set to be exposed as that type are returned
-  def self.services_exposed_to_ui_hash(expose_as = nil)
+  def self.services_exposed_to_ui_hash(expose_as = nil, current_user = nil, account = nil)
     if expose_as
       self.allowable_services.reject { |key, setting| setting[:expose_to_ui] != expose_as }
     else
       self.allowable_services.reject { |key, setting| !setting[:expose_to_ui] }
-    end
+    end.reject { |key, setting| setting[:expose_to_ui_proc] && !setting[:expose_to_ui_proc].call(current_user, account) }
   end
-  
+
   def service_enabled?(service)
     service = service.to_sym
     case service
@@ -1180,15 +1285,12 @@ class Account < ActiveRecord::Base
     :closed
   end
 
-  named_scope :root_accounts, :conditions => {:root_account_id => nil}
-  named_scope :processing_sis_batch, :conditions => ['accounts.current_sis_batch_id IS NOT NULL'], :order => :updated_at
-  named_scope :name_like, lambda { |name|
-    { :conditions => wildcard('accounts.name', name) }
+  scope :root_accounts, where(:root_account_id => nil)
+  scope :processing_sis_batch, where("accounts.current_sis_batch_id IS NOT NULL").order(:updated_at)
+  scope :name_like, lambda { |name|
+    where(wildcard('accounts.name', name))
   }
-  named_scope :active, :conditions => ['accounts.workflow_state != ?', 'deleted']
-  named_scope :limit, lambda {|limit|
-    {:limit => limit}
-  }
+  scope :active, where("accounts.workflow_state<>'deleted'")
 
   def canvas_network_enabled?
     false

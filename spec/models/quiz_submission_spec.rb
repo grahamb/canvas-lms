@@ -26,11 +26,11 @@ describe QuizSubmission do
   end
 
   it "should copy the quiz's points_possible whenever it's saved" do
-    Quiz.update_all("points_possible = 1.1", "id = #{@quiz.id}")
+    Quiz.where(:id => @quiz).update_all(:points_possible => 1.1)
     q = @quiz.quiz_submissions.create!
     q.reload.quiz_points_possible.should eql 1.1
 
-    Quiz.update_all("points_possible = 1.9", "id = #{@quiz.id}")
+    Quiz.where(:id => @quiz).update_all(:points_possible => 1.9)
     q.reload.quiz_points_possible.should eql 1.1
 
     q.save!
@@ -165,9 +165,9 @@ describe QuizSubmission do
     end
     res.should eql(false)
   end
-  
+
   context "explicitly setting grade" do
-    
+
     before(:each) do
       course_with_student
       @quiz = @course.quizzes.create!
@@ -184,28 +184,28 @@ describe QuizSubmission do
       @quiz_sub.fudge_points = 0
       @quiz_sub.kept_score = 5
       @quiz_sub.with_versioning(true, &:save!)
-      @submission = @quiz_sub.submission 
+      @submission = @quiz_sub.submission
     end
-    
+
     it "it should adjust the fudge points" do
       @assignment.grade_student(@user, {:grade => 3})
-      
+
       @quiz_sub.reload
       @quiz_sub.score.should == 3
       @quiz_sub.kept_score.should == 3
       @quiz_sub.fudge_points.should == -2
       @quiz_sub.manually_scored.should_not be_true
-      
+
       @submission.reload
       @submission.score.should == 3
       @submission.grade.should == "3"
     end
-    
+
     it "should use the explicit grade even if it isn't the highest score" do
       @quiz_sub.score = 4.0
       @quiz_sub.attempt = 2
       @quiz_sub.with_versioning(true, &:save!)
-      
+
       @quiz_sub.reload
       @quiz_sub.score.should == 4
       @quiz_sub.kept_score.should == 5
@@ -213,7 +213,7 @@ describe QuizSubmission do
       @submission.reload
       @submission.score.should == 5
       @submission.grade.should == "5"
-      
+
       @assignment.grade_student(@user, {:grade => 3})
       @quiz_sub.reload
       @quiz_sub.score.should == 3
@@ -224,7 +224,7 @@ describe QuizSubmission do
       @submission.score.should == 3
       @submission.grade.should == "3"
     end
-    
+
     it "should not have manually_scored set when updated normally" do
       @quiz_sub.score = 4.0
       @quiz_sub.attempt = 2
@@ -232,9 +232,9 @@ describe QuizSubmission do
       @assignment.grade_student(@user, {:grade => 3})
       @quiz_sub.reload
       @quiz_sub.manually_scored.should be_true
-      
+
       @quiz_sub.update_scores(:fudge_points => 2)
-      
+
       @quiz_sub.reload
       @quiz_sub.score.should == 2
       @quiz_sub.kept_score.should == 5
@@ -243,7 +243,7 @@ describe QuizSubmission do
       @submission.score.should == 5
       @submission.grade.should == "5"
     end
-    
+
     it "should add a version to the submission" do
       @assignment.grade_student(@user, {:grade => 3})
       @submission.reload
@@ -366,6 +366,29 @@ describe QuizSubmission do
     it "should increment the assignment needs_grading_count for pending_review state" do
       @quiz.assignment.reload.needs_grading_count.should == 1
     end
+
+    it "should not increment the assignment needs_grading_count if graded when a second attempt starts" do
+      @quiz_submission.update_scores({
+        'context_id' => @course.id,
+        'override_scores' => true,
+        'context_type' => 'Course',
+        'submission_version_number' => '1',
+        "question_score_#{@questions[0].id}" => '1'
+      })
+      @quiz.assignment.reload.needs_grading_count.should == 0
+      @quiz.generate_submission(@user)
+      @quiz_submission.reload.should be_untaken
+      @quiz_submission.submission.should be_graded
+      @quiz.assignment.reload.needs_grading_count.should == 0
+    end
+
+    it "should not decrement the assignment needs_grading_count if pending_review when a second attempt starts" do
+      @quiz.assignment.reload.needs_grading_count.should == 1
+      @quiz.generate_submission(@user)
+      @quiz_submission.reload.should be_untaken
+      @quiz_submission.submission.should be_pending_review
+      @quiz.assignment.reload.needs_grading_count.should == 1
+    end
   end
 
   describe "with multiple essay questions" do
@@ -442,9 +465,7 @@ describe QuizSubmission do
 
   it "should update associated submission" do
     c = factory_with_protected_attributes(Course, :workflow_state => "active")
-    a = c.assignments.new(:title => "some assignment")
-    a.workflow_state = "available"
-    a.save!
+    a = c.assignments.create!(:title => "some assignment")
     u = User.new
     u.workflow_state = "registered"
     u.save!
@@ -1261,6 +1282,231 @@ describe QuizSubmission do
       @quiz = @course.quizzes.create!
       qs = @quiz.generate_submission(@user)
       qs.grants_right?(@observer, nil, :read).should be_true
+    end
+  end
+
+  describe "question" do
+    let(:submission) { QuizSubmission.new }
+    let(:question1) { {:id => 1} }
+    let(:question2) { {:id => 2} }
+    let(:questions) { [question1, question2] }
+
+    before do
+      submission.stubs(:questions).returns(questions)
+    end
+
+    it "returns the question matching the passed in ID" do
+      submission.question(1).should == question1
+    end
+
+    it "casts the ID to an integer" do
+      submission.question('2').should == question2
+    end
+
+    it "returns nil when not found" do
+      submission.question(3).should be_nil
+    end
+
+    describe "has_question?" do
+      it "returns true when it has a question identified by the ID" do
+        submission.has_question?(1).should be_true
+      end
+
+      it "returns false when the question cannot be found" do
+        submission.has_question?(3).should be_false
+      end
+    end
+  end
+
+  describe "question_answered?" do
+    let(:submission) { QuizSubmission.new }
+
+    before do
+      submission.stubs(:temporary_data).returns \
+        'question_1' => 'A',
+        'question_2' => '',
+        'question_3_123456abcdefghijklmnopqrstuvwxyz' => 'A',
+        'question_3_654321abcdefghijklmnopqrstuvwxyz' => 'B',
+        'question_4_123456abcdefghijklmnopqrstuvwxyz' => 'A',
+        'question_4_654321abcdefghijklmnopqrstuvwxyz' => '',
+        'question_5_123456abcdefghijklmnopqrstuvwxyz' => '',
+        'question_5_654321abcdefghijklmnopqrstuvwxyz' => '',
+        'question_6_answer_5231'=>'7700',
+        'question_6_answer_3055'=>'3037',
+        'question_6_answer_7094'=>'9976',
+        'question_6_answer_6346'=>'6392',
+        'question_7_answer_5231'=>'7700',
+        'question_7_answer_3055'=>'',
+        'question_7_answer_7094'=>'9976',
+        'question_7_answer_6346'=>'',
+        'question_8_answer_123' => '0',
+        'question_8_answer_234' => '0',
+        'question_8_answer_345' => '0',
+        'question_9_answer_123' => '0',
+        'question_9_answer_234' => '1',
+        'question_9_answer_345' => '1'
+    end
+
+    context "on a single answer question" do
+      context "when answered" do
+        it "returns true" do
+          submission.question_answered?(1).should be_true
+        end
+      end
+
+      context "when not answered" do
+        it "returns false" do
+          submission.question_answered?(2).should be_false
+        end
+      end
+    end
+
+    context "on a fill in multiple blanks question" do
+      context "when all answered" do
+        it "returns true" do
+          submission.question_answered?(3).should be_true
+        end
+      end
+
+      context "when some answered" do
+        it "returns false" do
+          submission.question_answered?(4).should be_false
+        end
+      end
+
+      context "when none answered" do
+        it "returns false" do
+          submission.question_answered?(5).should be_false
+        end
+      end
+    end
+
+    context "on a matching question" do
+      context "when all answered" do
+        it "returns true" do
+          submission.question_answered?(6).should be_true
+        end
+      end
+
+      context "when some answered" do
+        it "returns false" do
+          submission.question_answered?(7).should be_false
+        end
+      end
+    end
+
+    context "on a multiple answers question" do
+      context "when none answered" do
+        it "returns false" do
+          submission.question_answered?(8).should be_false
+        end
+      end
+
+      context "when answers selected" do
+        it "returns true" do
+          submission.question_answered?(9).should be_true
+        end
+      end
+    end
+
+    context "with no response recorded yet" do
+      it "returns false" do
+        submission.question_answered?(100).should be_false
+      end
+    end
+  end
+
+  describe "update_submission_version" do
+    let(:submission) { QuizSubmission.new }
+
+    before do
+      submission.with_versioning(true) do |s|
+        s.score = 10
+        s.save_without_validation
+      end
+      submission.version_number.should == 1
+
+      submission.with_versioning(true) do |s|
+        s.score = 15
+        s.save_without_validation
+      end
+      submission.version_number.should == 2
+    end
+
+    it "updates a previous version given current attributes" do
+      vs = submission.versions
+      vs.size.should == 2
+
+      submission.score = 25
+      submission.update_submission_version(vs.last, [:score])
+      submission.versions.map{ |s| s.model.score }.should == [15, 25]
+    end
+
+    context "when loading UTF-8 data" do
+      it "should strip bad chars" do
+        vs = submission.versions
+
+        # inject bad byte into yaml
+        submission.submission_data = ["bad\x81byte"]
+        submission.update_submission_version(vs.last, [:submission_data])
+
+        # reload yaml by setting a different column
+        submission.score = 20
+        submission.update_submission_version(vs.last, [:score])
+
+        submission.versions.map{ |s| s.model.submission_data }.should == [nil, ["badbyte"]]
+      end
+    end
+
+  end
+
+  describe 'broadcast policy' do
+    before do
+      Notification.create(:name => 'Submission Graded')
+      Notification.create(:name => 'Submission Grade Changed')
+      Notification.create(:name => 'Submission Needs Grading')
+      student_in_course
+      assignment_quiz([])
+      @course.enroll_student(@student)
+      @submission = @quiz.generate_submission(@student)
+    end
+
+    it 'sends a graded notification after grading the quiz submission' do
+      @submission.messages_sent.should_not include 'Submission Graded'
+      @submission.grade_submission
+      @submission.reload.messages_sent.keys.should include 'Submission Graded'
+    end
+
+    it 'sends a grade changed notification after re-grading the quiz submission' do
+      @submission.grade_submission
+      @submission.score = @submission.score + 5
+      @submission.save!
+      @submission.reload.messages_sent.keys.should include('Submission Grade Changed')
+    end
+
+    it 'does not send any "graded" or "grade changed" notifications for a submission with essay questions before they have been graded' do
+      quiz_with_graded_submission([{:question_data => {:name => 'question 1', :points_possible => 1, 'question_type' => 'essay_question'}}])
+      @quiz_submission.reload.messages_sent.should_not include 'Submission Graded'
+      @quiz_submission.reload.messages_sent.should_not include 'Submission Grade Changed'
+    end
+
+    it 'sends a notifications for a submission with essay questions before they have been graded if manually graded' do
+      quiz_with_graded_submission([{:question_data => {:name => 'question 1', :points_possible => 1, 'question_type' => 'essay_question'}}])
+      @quiz_submission.set_final_score(2)
+      @quiz_submission.reload.messages_sent.keys.should include 'Submission Graded'
+    end
+
+    it 'sends a notification if the submission needs manual review' do
+      teacher_in_course
+      @course.enroll_teacher(@teacher)
+      quiz_with_graded_submission([{:question_data => {:name => 'question 1', :points_possible => 1, 'question_type' => 'essay_question'}}])
+      @quiz_submission.reload.messages_sent.keys.should include 'Submission Needs Grading'
+    end
+    it 'does not send a notification if the submission does not need manual review' do
+      teacher_in_course
+      @course.enroll_teacher(@teacher)
+      @submission.workflow_state = 'completed'; @submission.save!
+      @submission.reload.messages_sent.keys.should_not include 'Submission Needs Grading'
     end
   end
 end

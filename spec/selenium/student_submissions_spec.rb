@@ -5,22 +5,21 @@ require File.expand_path(File.dirname(__FILE__) + '/helpers/submissions_common')
 
 describe "submissions" do
   it_should_behave_like "in-process server selenium tests"
-  it_should_behave_like "submissions selenium tests"
 
   context 'as a student' do
 
-    DUE_DATE = Time.now.utc + 2.days
     before(:each) do
+      @due_date = Time.now.utc + 2.days
       course_with_student_logged_in
-      @assignment = @course.assignments.create!(:title => 'assignment 1', :name => 'assignment 1', :due_at => DUE_DATE)
+      @assignment = @course.assignments.create!(:title => 'assignment 1', :name => 'assignment 1', :due_at => @due_date)
       @second_assignment = @course.assignments.create!(:title => 'assignment 2', :name => 'assignment 2', :due_at => nil)
       @third_assignment = @course.assignments.create!(:title => 'assignment 3', :name => 'assignment 3', :due_at => nil)
-      @fourth_assignment = @course.assignments.create!(:title => 'assignment 4', :name => 'assignment 4', :due_at => DUE_DATE - 1.day)
+      @fourth_assignment = @course.assignments.create!(:title => 'assignment 4', :name => 'assignment 4', :due_at => @due_date - 1.day)
     end
 
     it "should not break when you open and close the media comment dialog" do
       stub_kaltura
-      pending("failing because it is dependant on an external kaltura system")
+      #pending("failing because it is dependant on an external kaltura system")
 
       create_assignment_and_go_to_page('media_recording')
 
@@ -30,10 +29,10 @@ describe "submissions" do
       # open it twice
       open_button.click
       # swf and other stuff load, give it half a second before it starts trying to click
-      sleep 0.5
+      sleep 1
       close_visible_dialog
       open_button.click
-      sleep 0.5
+      sleep 1
       close_visible_dialog
 
       # fire the callback that the flash object fires
@@ -48,11 +47,11 @@ describe "submissions" do
 
     it "should not allow blank media submission" do
       stub_kaltura
-      pending("failing because it is dependant on an external kaltura system")
+      #pending("failing because it is dependant on an external kaltura system")
 
       create_assignment_and_go_to_page 'media_recording'
       f(".submit_assignment_link").click
-      f('#media_comment_submit_button').attribute('disabled').should == 'true'
+      f('#media_comment_submit_button').should have_attribute('disabled', 'true')
       # leave so the "are you sure?!" message doesn't freeze up selenium
       f('#section-tabs .home').click
       driver.switch_to.alert.accept
@@ -109,7 +108,7 @@ describe "submissions" do
       f('#sidebar_content a.submit_assignment_link').text.should == "Submit Assignment"
     end
 
-    it "should not show as turned in or not turned in when assignment doesn't expect a submission" do
+    it "should not show as turned in or not turned in when assignment doesnt expect a submission" do
       # given
       @assignment.update_attributes(:submission_types => "on_paper")
       @assignment.grade_student(@student, :grade => "0")
@@ -125,19 +124,21 @@ describe "submissions" do
       @assignment.update_attributes(:submission_types => "online_text_entry")
       get "/courses/#{@course.id}/assignments/#{@assignment.id}"
       f('.submit_assignment_link').click
+      wait_for_ajaximations
       assignment_form = f('#submit_online_text_entry_form')
       wait_for_tiny(assignment_form)
       submit_form(assignment_form)
+      wait_for_ajaximations
 
       # it should not actually submit and pop up an error message
       f('.error_box').should be_displayed
       Submission.count.should == 0
 
       # now make sure it works
-      expect {
-        type_in_tiny('#submission_body', 'now it is not blank')
-        submit_form(assignment_form)
-      }.to change(Submission, :count).by(1)
+      type_in_tiny('#submission_body', 'now it is not blank')
+      submit_form(assignment_form)
+      wait_for_ajaximations
+      Submission.count.should == 1
     end
 
     it "should not allow a submission with only comments" do
@@ -222,16 +223,36 @@ describe "submissions" do
     end
 
     describe 'uploaded files for submission' do
-      it_should_behave_like "forked server selenium tests"
-      it_should_behave_like "files selenium shared"
+      it_should_behave_like "in-process server selenium tests"
+
+      def fixture_file_path(file)
+        path = ActionController::TestCase.respond_to?(:fixture_path) ? ActionController::TestCase.send(:fixture_path) : nil
+        return "#{path}#{file}"
+      end
+
+      def fixture_file_upload(file, mimetype)
+        ActionController::TestUploadedFile.new(fixture_file_path(file), mimetype)
+      end
+
+      def add_file(fixture, context, name)
+        context.attachments.create! do |attachment|
+          attachment.uploaded_data = fixture
+          attachment.filename = name
+          attachment.folder = Folder.root_folders(context).first
+        end
+      end
+
+      def make_folder_actions_visible
+        driver.execute_script("$('.folder_item').addClass('folder_item_hover')")
+      end
 
       it "should allow uploaded files to be used for submission" do
+        local_storage!
 
-        Setting.set("file_storage_test_override", "local")
         user_with_pseudonym :username => "nobody2@example.com",
                             :password => "asdfasdf2"
         course_with_student_logged_in :user => @user
-        login "nobody2@example.com", "asdfasdf2"
+        create_session @pseudonym, false
         add_file(fixture_file_upload('files/html-editing-test.html', 'text/html'),
                  @user, "html-editing-test.html")
         File.read(fixture_file_path("files/html-editing-test.html"))
@@ -240,13 +261,26 @@ describe "submissions" do
                                                  :submission_types => "online_upload")
         get "/courses/#{@course.id}/assignments/#{assignment.id}"
         f('.submit_assignment_link').click
+        wait_for_ajaximations
         f('.toggle_uploaded_files_link').click
+        wait_for_ajaximations
 
         # traverse the tree
-        f('#uploaded_files > ul > li.folder > .sign').click
-        wait_for_animations
-        f('#uploaded_files > ul > li.folder .file .name').click
-        wait_for_animations
+        begin
+          keep_trying_until do
+            f('#uploaded_files > ul > li.folder > .sign').click
+            wait_for_ajaximations
+            f('#uploaded_files > ul > li.folder .file .name').should be_displayed
+          end
+          f('#uploaded_files > ul > li.folder .file .name').click
+          wait_for_ajaximations
+        rescue => err
+          # prevent the confirm dialog that pops up when you navigate away
+          # from the page from showing.
+          # TODO: actually figure out why the spec intermittently fails.
+          driver.execute_script "window.onbeforeunload = null;"
+          raise err
+        end
 
         expect_new_page_load { f('#submit_file_button').click }
 

@@ -80,6 +80,9 @@
 #       // URL for this calendar event (to update, delete, etc.)
 #       url: "https://example.com/api/v1/calendar_events/234",
 #
+#       // URL for a user to view this event
+#       html_url: "https://example.com/calendar?event_id=234&include_contexts=course_123",
+#
 #       // The date of this event
 #       all_day_date: "2012-07-19",
 #
@@ -154,13 +157,15 @@
 #       // the context code of the (course) calendar this assignment belongs to
 #       context_code: "course_123",
 #
-#       // Current state of the assignment ("available", "published" or
-#       // "deleted")
+#       // Current state of the assignment ("published" or "deleted")
 #       workflow_state: "published",
 #
 #       // URL for this assignment (note that updating/deleting should be done
 #       // via the Assignments API)
 #       url: "https://example.com/api/v1/calendar_events/assignment_987",
+#
+#       // URL for a user to view this assignment
+#       html_url: "http://example.com/courses/123/assignments/987",
 #
 #       // The due date of this assignment
 #       all_day_date: "2012-07-19",
@@ -182,7 +187,7 @@
 class CalendarEventsApiController < ApplicationController
   include Api::V1::CalendarEvent
 
-  before_filter :require_user, :except => %w(public_feed)
+  before_filter :require_user, :except => %w(public_feed index)
   before_filter :get_calendar_context, :only => :create
 
   # @API List calendar events
@@ -198,6 +203,8 @@ class CalendarEventsApiController < ApplicationController
   #   returned.
   # @argument undated [Optional] Boolean, defaults to false (dated events only).
   #   If true, only return undated events and ignore start_date and end_date.
+  # @argument all_events [Optional] Boolean, defaults to false (uses start_date, end_date, and undated criteria).
+  #   If true, all events are returned, ignoring start_date, end_date, and undated criteria.
   # @argument context_codes[] [Optional] List of context codes of courses/groups/users whose events you want to see.
   #   If not specified, defaults to the current user (i.e personal calendar, 
   #   no course/group events). Limited to 10 context codes, additional ones are 
@@ -207,38 +214,27 @@ class CalendarEventsApiController < ApplicationController
     codes = (params[:context_codes] || [@current_user.asset_string])[0, 10]
     get_options(codes)
 
+    # if specific context codes were requested, ensure the user can access them
+    if codes && codes.length > 0
+      selected_context_codes = Set.new(@context_codes)
+      codes.each do |c|
+        unless selected_context_codes.include?(c)
+          render_unauthorized_action
+          return
+        end
+      end
+    else
+      # otherwise, ensure there is a user provided
+      unless @current_user
+        redirect_to_login
+        return
+      end
+    end
+
     scope  = @type == :assignment ? assignment_scope : calendar_event_scope
     events = Api.paginate(scope, self, api_v1_calendar_events_url)
     CalendarEvent.send(:preload_associations, events, :child_events) if @type == :event
-
-    if @type == :assignment
-      events = events.inject([]) do |assignments, assignment|
-        _, admin_dates = assignment.due_dates_for(@current_user)
-        if admin_dates.present?
-          overridden_dates, original_dates = admin_dates.partition { |date| date[:override] }
-
-          overridden_dates.each do |date|
-            assignments << AssignmentOverrideApplicator.assignment_with_overrides(assignment, [date[:override]])
-          end
-
-          original_dates.each { |date| assignments << assignment }
-        else
-          assignment.due_at = VariedDueDate.due_at_for?(assignment, @current_user)
-          assignments << assignment
-        end
-
-        assignments
-      end
-
-      # Once we've got all of the possible assignments, delete anything
-      # whose overrides put it outside of the current range.
-      events.delete_if do |assignment|
-        due_at = assignment.due_at.try(:to_datetime)
-        events.select { |e|
-          e.due_at == assignment.due_at && e.id == assignment.id
-        }.count > 1 || (due_at && (due_at > @end_date || due_at < @start_date))
-      end
-    end
+    events = apply_assignment_overrides(events) if @type == :assignment
 
     render :json => events.map{ |event| event_json(event, @current_user, session) }
   end
@@ -269,6 +265,9 @@ class CalendarEventsApiController < ApplicationController
   #        -F 'calendar_event[end_at]=2012-07-19T22:00:00Z' \ 
   #        -H "Authorization: Bearer <token>"
   def create
+    if params[:calendar_event][:description].present?
+      params[:calendar_event][:description] = process_incoming_html_content(params[:calendar_event][:description])
+    end
     @event = @context.calendar_events.build(params[:calendar_event])
     if authorized_action(@event, @current_user, :create)
       @event.validate_context! if @context.is_a?(AppointmentGroup)
@@ -366,8 +365,12 @@ class CalendarEventsApiController < ApplicationController
         @event.updating_user = @current_user
       end
       params[:calendar_event].delete(:context_code)
+      if params[:calendar_event][:description].present?
+        params[:calendar_event][:description] = process_incoming_html_content(params[:calendar_event][:description])
+      end
       if @event.update_attributes(params[:calendar_event])
-        render :json => event_json(@event, @current_user, session)
+        json_response = event_json(@event, @current_user, session)
+        render :json => json_response
       else
         render :json => @event.errors.to_json, :status => :bad_request
       end
@@ -400,7 +403,7 @@ class CalendarEventsApiController < ApplicationController
   end
 
   def public_feed
-    get_feed_context
+    return unless get_feed_context
     @events = []
 
     if @current_user
@@ -412,18 +415,28 @@ class CalendarEventsApiController < ApplicationController
 
       get_options(nil)
 
-      ActiveRecord::Base::ConnectionSpecification.with_environment(:slave) do
+      Shackles.activate(:slave) do
         @events.concat assignment_scope.all
+        @events = apply_assignment_overrides(@events)
         @events.concat calendar_event_scope.events_without_child_events.all
+
+        # Add in any appointment groups this user can manage and someone has reserved
+        appointment_codes = manageable_appointment_group_codes
+        @events.concat CalendarEvent.active.
+          for_user_and_context_codes(@current_user, appointment_codes).
+          send(*date_scope_and_args).
+          events_with_child_events.
+          all
       end
     else
       # if the feed url doesn't give us the requesting user,
       # we have to just display the generic course feed
       get_all_pertinent_contexts
-      ActiveRecord::Base::ConnectionSpecification.with_environment(:slave) do
+      Shackles.activate(:slave) do
         @contexts.each do |context|
-          @assignments = context.assignments.active.find(:all) if context.respond_to?("assignments")
-          @events.concat context.calendar_events.active.find(:all)
+          @assignments = context.assignments.active.all if context.respond_to?("assignments")
+          # no overrides to apply without a current user
+          @events.concat context.calendar_events.active.all
           @events.concat @assignments || []
         end
       end
@@ -488,12 +501,13 @@ class CalendarEventsApiController < ApplicationController
   end
 
   def get_options(codes)
-    unless value_to_boolean(params[:undated])
-      today = ActiveSupport::TimeWithZone.new(Time.now, Time.zone).to_date
-      @start_date ||= params[:start_date] && (Date.parse(params[:start_date]) rescue nil) || today.to_date
-      @end_date ||= params[:end_date] && (Date.parse(params[:end_date]) rescue nil) || today.to_date
-      @end_date = @start_date if @end_date < @start_date
-      @end_date += 1
+    @all_events = value_to_boolean(params[:all_events])
+    @undated = value_to_boolean(params[:undated])
+    if !@all_events && !@undated
+      today = Time.zone.now
+      @start_date ||= TimeHelper.try_parse(params[:start_date], today).beginning_of_day
+      @end_date ||= TimeHelper.try_parse(params[:end_date], today).end_of_day
+      @end_date = @start_date.end_of_day if @end_date < @start_date
     end
 
     @type ||= params[:type] == 'assignment' ? :assignment : :event
@@ -504,20 +518,38 @@ class CalendarEventsApiController < ApplicationController
     # a function parameter
     params[:include_contexts] = codes.join(",") if codes
 
-    get_all_pertinent_contexts(true)
+    # only get pertinent contexts if there is a user
+    if @current_user
+      get_all_pertinent_contexts(true)
+    end
 
     if codes
+      # add publicly accessible courses to the selected contexts
+      @contexts ||= []
+      pertinent_context_codes = Set.new @contexts.map { |c| c.asset_string }
+
+      codes.each do |c|
+        unless pertinent_context_codes.include?(c)
+          context = Context.find_by_asset_string(c)
+          @contexts.push context if context && (context.is_public || context.public_syllabus)
+        end
+      end
+
+      # filter the contexts to only the requested contexts
       selected_contexts = @contexts.select{ |c| codes.include?(c.asset_string) }
     else
       selected_contexts = @contexts
     end
     @context_codes = selected_contexts.map(&:asset_string)
-    @section_codes = selected_contexts.inject([]){ |ary, context|
-      next ary unless context.is_a?(Course)
-      ary + context.sections_visible_to(@current_user).map(&:asset_string)
-    }
+    @section_codes = []
+    if @current_user
+      @section_codes = selected_contexts.inject([]){ |ary, context|
+        next ary unless context.is_a?(Course)
+        ary + context.sections_visible_to(@current_user).map(&:asset_string)
+      }
+    end
 
-    if @type == :event && @start_date
+    if @type == :event && @start_date && @current_user
       # pull in reservable appointment group events, if requested
       group_codes = codes.grep(/\Aappointment_group_(\d+)\z/).map{ |m| m.sub(/.*_/, '').to_i }
       if group_codes.present?
@@ -529,26 +561,78 @@ class CalendarEventsApiController < ApplicationController
       end
       # include manageable appointment group events for the specified contexts
       # and dates
-      @context_codes += AppointmentGroup.
-                          manageable_by(@current_user, @context_codes).
-                          intersecting(@start_date, @end_date).
-                          map(&:asset_string)
+      @context_codes += manageable_appointment_group_codes
     end
   end
 
   def assignment_scope
-    Assignment.active.
-      for_context_codes(@context_codes).
-      send(*date_scope_and_args(:due_between_with_overrides))
+    # Fully ordering by due_at requires examining all the overrides linked and as it applies to
+    # specific people, sections, etc. This applies the base assignment due_at for ordering
+    # as a more sane default then natural DB order. No, it isn't perfect but much better.
+    scope = Assignment.active.order_by_base_due_at.
+      for_context_codes(@context_codes)
+
+    scope = scope.send(*date_scope_and_args(:due_between_with_overrides)) unless @all_events
+    scope
   end
 
   def calendar_event_scope
-    CalendarEvent.active.
-      for_user_and_context_codes(@current_user, @context_codes, @section_codes).
-      send(*date_scope_and_args)
+    scope = CalendarEvent.active.order_by_start_at
+    if @current_user
+      scope = scope.for_user_and_context_codes(@current_user, @context_codes, @section_codes)
+    else
+      scope = scope.for_context_codes(@context_codes)
+    end
+
+    scope = scope.send(*date_scope_and_args) unless @all_events
+    scope
   end
 
   def search_params
     params.slice(:start_at, :end_at, :undated, :context_codes, :type)
+  end
+
+  def apply_assignment_overrides(events)
+    events = events.inject([]) do |assignments, assignment|
+      _, admin_dates = assignment.due_dates_for(@current_user)
+      if admin_dates.present?
+        overridden_dates, original_dates = admin_dates.partition { |date| date[:override] }
+
+        overridden_dates.each do |date|
+          assignments << AssignmentOverrideApplicator.assignment_with_overrides(assignment, [date[:override]])
+        end
+
+        original_dates.each { |date| assignments << assignment }
+      else
+        assignment = assignment.overridden_for(@current_user)
+        assignment.infer_all_day
+        assignments << assignment
+      end
+
+      assignments
+    end
+
+    if !@all_events && !@undated
+      # Once we've got all of the possible assignments, delete anything
+      # whose overrides put it outside of the current range.
+      events.delete_if do |assignment|
+        due_at = assignment.due_at
+        due_at && (due_at > @end_date || due_at < @start_date)
+      end
+    end
+
+    events
+  end
+
+  def manageable_appointment_group_codes
+    return [] unless @current_user
+
+    AppointmentGroup.
+      manageable_by(@current_user, @context_codes).
+      intersecting(@start_date, @end_date).
+      map(&:asset_string)
+  end
+
+  def select_public_codes(codes)
   end
 end

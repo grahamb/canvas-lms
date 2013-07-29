@@ -151,6 +151,8 @@ define [
           model: $target.data('view').model
           parent: $target.parent().data('view')
         $sidebar.data('drag', dragObject)
+        $target.blur()
+        $target.focus()
 
     # Internal: Cancel a drag and drop action.
     #
@@ -195,7 +197,7 @@ define [
     #
     # Returns nothing.
     updateTitle: ->
-      @$('span').text h(@model.get 'title')
+      @$('span').text @model.get 'title'
       @$('a').attr('title', h(@model.get 'title'))
 
     # Public: Init dragging and render view.

@@ -22,6 +22,12 @@ describe "i18n js" do
         return I18n.scoped('foo').translate('bar', "only one of these won't get escaped: <input>, %{a}, %{b} & %{c}", {a: '<img>', b: $.raw('<br>'), c: '<hr>'})
       JS
     end
+    
+    it "should html-escape translations and interpolations if any placeholders are flagged as safe" do
+      driver.execute_script(<<-JS).should == 'only one of these won\'t get escaped: &lt;input&gt;, &lt;img&gt;, <br> &amp; &lt;hr&gt;'
+        return I18n.scoped('foo').translate('bar', "only one of these won't get escaped: <input>, %{a}, %h{b} & %{c}", {a: '<img>', b: '<br>', c: '<hr>'})
+      JS
+    end
   end
 
   context "wrappers" do
@@ -89,6 +95,7 @@ describe "i18n js" do
   context "scoped" do
     it "should use the scoped translations" do
       pending('USE_OPTIMIZED_JS=true') unless ENV['USE_OPTIMIZED_JS']
+      pending('RAILS_LOAD_ALL_LOCALES=true') unless ENV['RAILS_LOAD_ALL_LOCALES']
       (I18n.available_locales - [:en]).each do |locale|
         exec_cs("I18n.locale = '#{locale}'")
         require_exec('i18n!conferences', "i18n.t('confirm.delete')").should ==

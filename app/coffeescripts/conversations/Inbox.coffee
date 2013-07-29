@@ -24,8 +24,8 @@ define [
   'compiled/conversations/ConversationsPane'
   'compiled/conversations/MessageFormPane'
   'compiled/conversations/audienceList'
-  'compiled/conversations/contextList'
-  'compiled/widget/TokenInput'
+  'compiled/util/contextList'
+  'compiled/widget/ContextSearch'
   'compiled/str/TextHelper'
   'jquery.ajaxJSON'
   'jquery.instructure_date_and_time'
@@ -90,14 +90,8 @@ define [
       ret
 
     htmlContextList: (contexts, options = {}) ->
-      filters = options.filters ? []
-      contexts = (course for id, roles of contexts.courses when course = @contexts.courses[id]).
-           concat(group for id, roles of contexts.groups when group = @contexts.groups[id])
-      contexts = for context in contexts
-        context = _.clone(context)
-        context.activeFilter = _.include(filters, "#{context.type}_#{context.id}")
-        context
-      contextList(contexts, options)
+      contexts = {courses: _.keys(contexts.courses), groups: _.keys(contexts.groups)}
+      contextList(contexts, @contexts, options)
 
     htmlNameForUser: (user, contexts = {courses: user.common_courses, groups: user.common_groups}) ->
       h(user.name) + if contexts.courses?.length or contexts.groups?.length then " <em>" + @htmlContextList(contexts) + "</em>" else ''
@@ -194,12 +188,22 @@ define [
           $text.show()
           $target.hide()
       $pmAction = $message.find('a.send_private_message')
-      pmUrl = $.replaceTags $pmAction.attr('href'),
-        user_id: data.author_id
-        user_name: encodeURIComponent(userName)
-        from_conversation_id: @conversations.active?().id
-      $pmAction.attr('href', pmUrl).click (e) =>
+      $pmAction.on 'click', (e) =>
+        e.preventDefault()
         e.stopPropagation()
+        user = @userCache[data.author_id]
+        # Click the "New Message" button and after a short delay,
+        # add the clicked user's token to the input.
+        $('#action_compose_message').trigger('click')
+        clearTimeout @addUserTokenCb if @addUserTokenCb
+        @addUserTokenCb = setTimeout =>
+          delete @addUserTokenCb
+          @formPane.form.addToken
+            value: user.id
+            text: user.name
+            data: user
+        ,
+          100
       if data.forwarded_messages?.length
         $ul = $('<ul class="messages"></ul>')
         for submessage in data.forwarded_messages
@@ -308,7 +312,6 @@ define [
 
     closeMenus: () ->
       $('#actions .menus > li, #conversation_actions, #conversations .actions').removeClass('selected')
-      $('#conversations li.menu_active').removeClass('menu_active')
 
     openMenu: ($menu) ->
       @closeMenus()
@@ -391,10 +394,11 @@ define [
 
 
       @$messageList.click (e) =>
-        if $(e.target).closest('a.instructure_inline_media_comment').length
+        if $(e.target).closest('a.instructure_inline_media_comment, .mejs-container').length
           # a.instructure_inline_media_comment clicks have to propagate to the
           # top due to "live" handling; if it's one of those, it's not really
           # intended for us, just let it go
+          # also, dont catch clicks on mediaelementjs videos.  that is for play/pause
         else
           $message = $(e.target).closest('#messages > ul > li')
           unless $message.hasClass('generated')
@@ -525,75 +529,12 @@ define [
           close: =>
             $('#add_recipients').data('token_input').$input.blur()
 
-    buildContextInfo: (data) ->
-      match = data.id.match(/^(course|section)_(\d+)$/)
-      termInfo = @contexts["#{match[1]}s"][match[2]] if match
-
-      contextInfo = data.context_name or ''
-      contextInfo = if contextInfo.length < 40 then contextInfo else contextInfo.substr(0, 40) + '...'
-      if termInfo?.term
-        contextInfo = if contextInfo
-          "#{contextInfo} - #{termInfo.term}"
-        else
-          termInfo.term
-
-      if contextInfo
-        $('<span />', class: 'context_info').text("(#{contextInfo})")
-      else
-        ''
-
     initializeTokenInputs: ($scope) ->
-      buildPopulator = (pOptions={}) =>
-        (selector, $node, data, options={}) =>
-          data.id = "#{data.id}"
-          if data.avatar_url
-            $img = $('<img class="avatar" />')
-            $img.attr('src', data.avatar_url)
-            $node.append($img)
-          $b = $('<b />')
-          $b.text(data.name)
-          $name = $('<span />', class: 'name')
-          $contextInfo = @buildContextInfo(data) unless options.parent
-          $name.append($b, $contextInfo)
-          $span = $('<span />', class: 'details')
-          if data.common_courses?
-            $span.html(@htmlContextList({courses: data.common_courses, groups: data.common_groups}, hardCutoff: 2))
-          else if data.type and data.user_count?
-            $span.text(I18n.t('people_count', 'person', {count: data.user_count}))
-          else if data.item_count?
-            if data.id.match(/_groups$/)
-              $span.text(I18n.t('groups_count', 'group', {count: data.item_count}))
-            else if data.id.match(/_sections$/)
-              $span.text(I18n.t('sections_count', 'section', {count: data.item_count}))
-          else if data.subText
-            $span.text(data.subText)
-          $node.append($name, $span)
-          $node.attr('title', data.name)
-          text = data.name
-          if options.parent
-            if data.selectAll and data.noExpand # "Select All", e.g. course_123_all -> "Spanish 101: Everyone"
-              text = options.parent.data('text')
-            else if data.id.match(/_\d+_/) # e.g. course_123_teachers -> "Spanish 101: Teachers"
-              text = I18n.beforeLabel(options.parent.data('text')) + " " + text
-          $node.data('text', text)
-          $node.data('id', if data.type is 'context' or not pOptions.prefixUserIds then data.id else "user_#{data.id}")
-          data.rootId = options.ancestors[0]
-          $node.data('user_data', data)
-          $node.addClass(if data.type then data.type else 'user')
-          if options.level > 0 and selector.options.showToggles
-            $node.prepend('<a class="toggle"><i></i></a>')
-            $node.addClass('toggleable') unless data.item_count # can't toggle certain synthetic contexts, e.g. "Student Groups"
-          if data.type == 'context' and not data.noExpand
-            $node.prepend('<a class="expand"><i></i></a>')
-            $node.addClass('expandable')
-
-      placeholderText =  I18n.t('recipient_field_placeholder', "Enter a name, course, or group")
-      noResultsText = I18n.t('no_results', 'No results found')
       everyoneText  = I18n.t('enrollments_everyone', "Everyone")
       selectAllText = I18n.t('select_all', "Select All")
 
-      ($scope ? $(document)).find('.recipients').tokenInput
-        placeholder: placeholderText
+      ($scope ? $(document)).find('.recipients').contextSearch
+        contexts: @contexts
         added: (data, $token, newToken) =>
           data.id = "#{data.id}"
           if newToken and data.rootId
@@ -611,82 +552,43 @@ define [
             delete data.avatar_url # since it's the wrong size and possibly a blank image
             currentData = @userCache[data.id] ? {}
             @userCache[data.id] = $.extend(currentData, data)
+        canToggle: (data) ->
+          data.type is 'user' or data.permissions?.send_messages_all
         selector:
-          messages: {noResults: noResultsText}
-          populator: buildPopulator()
-          limiter: (options) =>
-            if options.level > 0 then -1 else 5
           showToggles: true
-          preparer: (postData, data, parent) =>
-            context = postData.context
-            if not postData.search and context and data.length > 1
-              if context.match(/^(course|section)_\d+$/)
-                # i.e. we are listing synthetic contexts under a course or section
-                data.unshift
-                  id: "#{context}_all"
-                  name: everyoneText
-                  user_count: parent.data('user_data').user_count
-                  type: 'context'
-                  avatar_url: parent.data('user_data').avatar_url
-                  selectAll: true
-              else if context.match(/^((course|section)_\d+_.*|group_\d+)$/) and not context.match(/^course_\d+_(groups|sections)$/)
-                # i.e. we are listing all users in a group or synthetic context
-                data.unshift
-                  id: context
-                  name: selectAllText
-                  user_count: parent.data('user_data').user_count
-                  type: 'context'
-                  avatar_url: parent.data('user_data').avatar_url
-                  selectAll: true
-                  noExpand: true # just a magic select-all checkbox, you can't drill into it
+          includeEveryoneOption: (postData, parent) =>
+            # i.e. we are listing synthetic contexts under a course or section
+            if postData.context?.match(/^(course|section)_\d+$/)
+              everyoneText
+          includeSelectAllOption: (postData, parent) =>
+            # i.e. we are listing all users in a group or synthetic context
+            if postData.context?.match(/^((course|section)_\d+_.*|group_\d+)$/) and not postData.context?.match(/^(course|section)_\d+$/) and not postData.context?.match(/^course_\d+_(groups|sections)$/) and parent.data('user_data').permissions.send_messages_all
+              selectAllText
           baseData:
-            synthetic_contexts: 1
-          browser:
-            data:
-              per_page: -1
-              type: 'context'
+            permissions: ["send_messages_all"]
 
       return if $scope
 
       @filterNameMap = {}
-      $('#context_tags').tokenInput
-        placeholder: placeholderText
+      $('#context_tags').contextSearch
+        contexts: @contexts
+        prefixUserIds: true
         added: (data, $token, newToken) =>
-          $token.prevAll().remove()
+          $token.prevAll().remove() # only one token at a time
         tokenWrapBuffer: 80
         selector:
-          messages: {noResults: noResultsText}
-          populator: buildPopulator(prefixUserIds: true)
-          limiter: (options) => 5
-          preparer: (postData, data, parent) =>
-            context = postData.context
-            if not postData.search and context and data.length > 0 and context.match(/^(course|group)_\d+$/)
-              if data.length > 1 and context.match(/^course_/)
-                data.unshift
-                  id: "#{context}_all"
-                  name: everyoneText
-                  user_count: parent.data('user_data').user_count
-                  type: 'context'
-                  avatar_url: parent.data('user_data').avatar_url
-              filterText = if context.match(/^course/)
-                I18n.t('filter_by_course', 'Filter by this course')
-              else
-                I18n.t('filter_by_group', 'Filter by this group')
-              data.unshift
-                id: context
-                name: parent.data('text')
-                type: 'context'
-                avatar_url: parent.data('user_data').avatar_url
-                subText: filterText
-                noExpand: true
+          includeEveryoneOption: (postData, parent) =>
+            if postData.context?.match(/^course_\d+$/)
+              everyoneText
+          includeFilterOption: (postData) =>
+            if postData.context?.match(/^course_\d+$/)
+              I18n.t('filter_by_course', 'Filter by this course')
+            else if postData.context?.match(/^group_\d+$/)
+              I18n.t('filter_by_group', 'Filter by this group')
           baseData:
             synthetic_contexts: 1
             types: ['course', 'user', 'group']
             include_inactive: true
-          browser:
-            data:
-              per_page: -1
-              types: ['context']
       filterInput = $('#context_tags').data('token_input')
       filterInput.change = (tokenValues) =>
         filters = for pair in filterInput.tokenPairs()

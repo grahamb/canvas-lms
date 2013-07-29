@@ -14,7 +14,9 @@
   correct = user_answer && hash_get(user_answer, :correct) == true
   incorrect = user_answer && hash_get(user_answer, :correct) == false
   unanswered = (%w{multiple_choice_question true_false_question}.include?(hash_get(question, 'question_type')) && incorrect && hash_get(user_answer, 'text').blank?) ||
-    (hash_get(question, 'question_type') == 'multiple_answers_question' && incorrect && user_answer.select{|k, v| k.to_s.match(/answer_/) && v.to_s != '0' }.length == 0) || false
+    (hash_get(question, 'question_type') == 'multiple_answers_question' && incorrect && user_answer.select{|k, v| k.to_s.match(/answer_/) && v.to_s != '0' }.length == 0) || 
+    (hash_get(question, 'question_type') == 'file_upload_question' && hash_get(user_answer, 'attachment_ids').blank?) ||
+    false
   partial_credit = user_answer && hash_get(user_answer, :correct) == 'partial'
   asset_string ||= (question_bank_id ? 'assessment_question' : 'quiz_question') + "_#{hash_get(question, :id)}"
   if question_type.display_answers == "multiple" && hash_get(question, :question_type) != "missing_word_question"
@@ -25,9 +27,9 @@
 <div class="question_holder <%= "group" if in_group %>" id="<%= "question_template" unless question %>" style="<%= hidden unless question %>">
   <div style="display: block; height: 1px; overflow: hidden;">&nbsp;</div>
   <a name="question_<%= hash_get(question, :id, "blank") %>"></a>
-  <div class="display_question question <%= question_type.question_type %> <%= "marked" if assessing && @stored_params && @stored_params["question_#{hash_get(question, :id)}_marked"] %> <%= "correct" if correct %> <%= "incorrect" if incorrect %> <%= "unanswered" if unanswered %> <%= "partial_credit" if partial_credit %>" id="question_<%= hash_get(question, :id, "new") %>">
+  <div class="display_question question <%= question_type.question_type %> <%= "marked" if assessing && @stored_params && @stored_params["question_#{hash_get(question, :id)}_marked"].present? %> <%= "correct" if correct %> <%= "incorrect" if incorrect %> <%= "unanswered" if unanswered %> <%= "partial_credit" if partial_credit %>" id="question_<%= hash_get(question, :id, "new") %>">
     <div class="move"><%= image_tag "move.png", :class => "move_icon" %></div>
-    <% if assessing %>
+    <% if assessing && @quiz_presenter.can_go_back? %>
       <div class="flag_question"></div>
     <% end %>
     <div class="header" <%= hidden(true) if (assessing || assessment_results) && question_type && question_type.entry_type == "none" %>>
@@ -58,8 +60,8 @@
       <% end %>
     </div>
     <div class="links" style="<%= hidden if user_answer || assessing %>">
-      <a href="#" class="edit_question_link no-hover" title="<%= t 'links.edit_question', 'Edit this Question' %>"><%= image_tag "edit.png" %></a>
-      <a href="#" class="delete_question_link no-hover" title="<%= t 'links.delete_question', 'Delete this Question' %>"><%= image_tag "delete.png" %></a>
+      <a href="#" class="edit_question_link no-hover" title="<%= t 'links.edit_question', 'Edit this Question' %>"><i class="icon-edit standalone-icon"></i></a>
+      <a href="#" class="delete_question_link no-hover" title="<%= t 'links.delete_question', 'Delete this Question' %>"><i class="icon-end standalone-icon"></i></a>
     </div>
     <div style="display: none;">
       <span class="question_type"><%= (question_type.try_rescue(:question_type)) %></span>
@@ -222,7 +224,7 @@
                      answer_classes << 'no_answer' if hash_get(user_answer, :text).blank?
                   %>
                   <div class='answer <%= answer_classes.compact.join(' ') %>'>
-                    <%= h(hash_get(user_answer, :text) || t(:you_left_this_blank, "(You left this blank)")) %>
+                    <%= hash_get(user_answer, :text) || t(:you_left_this_blank, "(You left this blank)") %>
                     <% if matched_answer && comment_get(matched_answer, :comments).present? %>
                       <div class="hide_right_arrow <%= "correct_answer" if display_correct_answers %>">
                         <div class="quiz_comment">
@@ -260,10 +262,10 @@
                     matched_answer = a if hash_get(a, :numerical_answer_type) == 'range_answer' && val <= hash_get(a, :end) && val >= hash_get(a, :start)
                   end %>
                   <% answer_classes = ['selected_answer']
-                     if display_correct_answers
-                       answer_classes << ((hash_get(user_answer, :correct) == true) ? 'correct_answer' : 'wrong_answer')
-                     end
-                     answer_classes << 'no_answer' if hash_get(user_answer, :text).blank?
+                    if display_correct_answers && hash_get(question,:question_type) != 'file_upload_question'
+                     answer_classes << ((hash_get(user_answer, :correct) == true) ? 'correct_answer' : 'wrong_answer')
+                   end
+                   answer_classes << 'no_answer' if hash_get(user_answer, :text).blank? || hash_get(user_answer, :attachment_ids).blank?
                   %>
                   <div class='answer <%= answer_classes.compact.join(' ') %>'>
                     <%= render :partial => "quizzes/single_answer", :locals =>

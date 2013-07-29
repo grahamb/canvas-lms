@@ -59,8 +59,9 @@ module Api
     unless columns.empty?
       find_params = sis_make_params_for_sis_mapping_and_columns(columns, sis_mapping, root_account)
       return result if find_params == :not_found
-      find_params[:select] = :id
-      result.concat collection.all(find_params).map(&:id)
+      # pluck ignores include
+      find_params[:joins] = find_params.delete(:include) if find_params[:include]
+      result.concat collection.scoped(find_params).pluck(:id)
       result.uniq!
     end
     result
@@ -126,6 +127,15 @@ module Api
     return columns
   end
 
+  # remove things that don't look like valid database IDs
+  # return in integer format if possible
+  # (note that ID_REGEX may be redefined by a plugin!)
+  def self.map_non_sis_ids(ids)
+    ids.map{ |id| id.to_s.strip }.select{ |id| id =~ ID_REGEX }.map do |id|
+      id =~ /\A\d+\z/ ? id.to_i : id
+    end
+  end
+
   def self.sis_find_sis_mapping_for_collection(collection)
     SIS_MAPPINGS[collection.table_name] or
         raise(ArgumentError, "need to add support for table name: #{collection.table_name}")
@@ -181,15 +191,20 @@ module Api
     pagination_args.reverse_merge!({ :page => controller.params[:page], :per_page => per_page })
     collection = collection.paginate(pagination_args)
     return unless collection.respond_to?(:next_page)
-    total_pages = (pagination_args[:without_count] ? nil : collection.total_pages)
-    total_pages = nil if total_pages.to_i <= 1
+
+    first_page = collection.respond_to?(:first_page) && collection.first_page
+    first_page ||= 1
+
+    last_page = (pagination_args[:without_count] ? nil : collection.total_pages)
+    last_page = nil if last_page.to_i <= 1
+
     links = build_links(base_url, {
       :query_parameters => controller.request.query_parameters,
       :per_page => collection.per_page,
       :next => collection.next_page,
       :prev => collection.previous_page,
-      :first => 1,
-      :last => total_pages,
+      :first => first_page,
+      :last => last_page,
     })
     controller.response.headers["Link"] = links.join(',') if links.length > 0
     collection
@@ -254,9 +269,25 @@ module Api
 
     rewriter = UserContent::HtmlRewriter.new(context, user)
     rewriter.set_handler('files') do |match|
-      obj = match.obj_id && match.obj_class.find_by_id(match.obj_id)
+      if match.obj_id
+        if match.obj_class == Attachment && context && !context.is_a?(User)
+          obj = context.attachments.find(match.obj_id) rescue nil
+        else
+          obj = match.obj_class.find_by_id(match.obj_id)
+        end
+      end
       next unless obj && rewriter.user_can_view_content?(obj)
-      file_download_url(obj.id, :verifier => obj.uuid, :download => '1', :host => host, :protocol => protocol)
+
+      if ["Course", "Group", "Account", "User"].include?(obj.context_type)
+        if match.rest.start_with?("/preview")
+          url = self.send("#{obj.context_type.downcase}_file_preview_url", obj.context_id, obj.id, :verifier => obj.uuid, :host => host, :protocol => protocol)
+        else
+          url = self.send("#{obj.context_type.downcase}_file_download_url", obj.context_id, obj.id, :verifier => obj.uuid, :download => '1', :host => host, :protocol => protocol)
+        end
+      else
+        url = file_download_url(obj.id, :verifier => obj.uuid, :download => '1', :host => host, :protocol => protocol)
+      end
+      url
     end
     html = rewriter.translate_content(html)
 
@@ -265,7 +296,7 @@ module Api
     # translate media comments into html5 video tags
     doc = Nokogiri::HTML::DocumentFragment.parse(html)
     doc.css('a.instructure_inline_media_comment').each do |anchor|
-      media_id = anchor['id'].try(:gsub, /^media_comment_/, '')
+      media_id = anchor['id'].try(:sub, /^media_comment_/, '')
       next if media_id.blank?
 
       if anchor['class'].try(:match, /\baudio_comment\b/)
@@ -325,6 +356,75 @@ module Api
     return doc.to_s
   end
 
+  # This removes the verifier parameters that are added to attachment links by api_user_content
+  # and adds context (e.g. /courses/:id/) if it is missing
+  # exception: it leaves user-context file links alone
+  def process_incoming_html_content(html)
+    return html unless html.present?
+    # shortcut html documents that definitely don't have anything we're interested in
+    return html unless html =~ %r{verifier=|['"]/files|instructure_inline_media_comment}
+
+    attrs = ['href', 'src']
+    link_regex = %r{/files/(\d+)/(?:download|preview)}
+    verifier_regex = %r{(\?)verifier=[^&]*&?|&verifier=[^&]*}
+
+    context_types = ["Course", "Group", "Account"]
+    skip_context_types = ["User"]
+
+    doc = Nokogiri::HTML(html)
+    doc.search("*").each do |node|
+      attrs.each do |attr|
+        if link = node[attr]
+          if link =~ link_regex
+            if link.start_with?('/files')
+              att_id = $1
+              att = Attachment.find_by_id(att_id)
+              if att
+                next if skip_context_types.include?(att.context_type)
+                if context_types.include?(att.context_type)
+                  link = "/#{att.context_type.underscore.pluralize}/#{att.context_id}" + link
+                end
+              end
+            end
+            if link.include?('verifier=')
+              link.gsub!(verifier_regex, '\1')
+            end
+            node[attr] = link
+          end
+        end
+      end
+    end
+
+    # translate audio and video tags generated by media comments back into anchor tags
+    # try to add the relevant attributes to media comment anchor tags to retain MediaObject info
+    doc.css('audio.instructure_inline_media_comment, video.instructure_inline_media_comment, a.instructure_inline_media_comment').each do |node|
+      if node.name == 'a'
+        media_id = node['id'].try(:sub, /^media_comment_/, '')
+      else
+        media_id = node['data-media_comment_id']
+      end
+      next if media_id.blank?
+
+      if node.name == 'a'
+        anchor = node
+        unless anchor['class'] =~ /\b(audio|video)_comment\b/
+          media_object = MediaObject.active.by_media_id(media_id).first
+          anchor['class'] += " #{media_object.media_type}_comment" if media_object
+        end
+      else
+        comment_type = "#{node.name}_comment"
+        anchor = Nokogiri::XML::Node.new('a', doc)
+        anchor['class'] = "instructure_inline_media_comment #{comment_type}"
+        anchor['id'] = "media_comment_#{media_id}"
+        node.replace(anchor)
+      end
+
+      anchor['href'] = "/media_objects/#{media_id}"
+    end
+
+    return doc.at_css('body').inner_html
+  end
+
   def value_to_boolean(value)
     Canvas::Plugin.value_to_boolean(value)
   end
@@ -377,6 +477,15 @@ module Api
       %r{^/groups/#{ID}/files/(#{ID})/} => ['File', :api_v1_attachment_url, :id],
       %r{^/users/#{ID}/files/(#{ID})/} => ['File', :api_v1_attachment_url, :id],
       %r{^/files/(#{ID})/} => ['File', :api_v1_attachment_url, :id],
+
+      # List quizzes
+      %r{^/courses/(#{ID})/quizzes$} => ['[Quiz]', :api_v1_course_quizzes_url, :course_id],
+
+      # Get quiz
+      %r{^/courses/(#{ID})/quizzes/(#{ID})$} => ['Quiz', :api_v1_course_quiz_url, :course_id, :id],
+
+      # Launch LTI tool
+      %r{^/courses/(#{ID})/external_tools/retrieve\?url=(.*)$} => ['SessionlessLaunchUrl', :api_v1_course_external_tool_sessionless_launch_url, :course_id, :url],
   }.freeze
 
   def api_endpoint_info(protocol, host, url)

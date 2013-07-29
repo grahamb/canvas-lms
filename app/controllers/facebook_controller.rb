@@ -20,8 +20,7 @@ class FacebookController < ApplicationController
   protect_from_forgery :only => []
   before_filter :get_facebook_user
   before_filter :require_facebook_user, :only => [:settings, :notification_preferences, :hide_message]
-  filter_parameter_logging :fb_sig_friends
-  
+
   def notification_preferences
     @cc = @user.communication_channels.find_by_path_type('facebook')
     if @cc
@@ -63,7 +62,7 @@ class FacebookController < ApplicationController
     if @user
       @messages = @user.messages.to_facebook.to_a
       Facebook.dashboard_clear_count(@service) if @service
-      @domains = @user.pseudonyms.scoped({:include => :account}).to_a.once_per(&:account_id).map{|p| HostUrl.context_host(p.account) }.uniq
+      @domains = @user.pseudonyms.includes(:account).to_a.once_per(&:account_id).map{|p| HostUrl.context_host(p.account) }.uniq
     end
     respond_to do |format|
       format.html { render :action => 'index', :layout => 'facebook' }
@@ -103,12 +102,13 @@ class FacebookController < ApplicationController
 
   def get_facebook_user
     return false if facebook_disabled?
+    @embeddable = true
 
     if params[:signed_request]
       data, sig = Facebook.parse_signed_request(params[:signed_request])
       if data && sig
         if @facebook_user_id = data['user_id']
-          Shard.with_each_shard do
+          Shard.with_each_shard(UserService.associated_shards('facebook', @facebook_user_id)) do
             @service = UserService.find_by_service_and_service_user_id('facebook', @facebook_user_id)
             break if @service
           end
@@ -129,7 +129,7 @@ class FacebookController < ApplicationController
       @service = @user.user_services.find_by_service('facebook')
     elsif session[:facebook_user_id]
       @facebook_user_id = session[:facebook_user_id]
-      Shard.with_each_shard do
+      Shard.with_each_shard(UserService.associated_shards('facebook', @facebook_user_id)) do
         @service = UserService.find_by_service_and_service_user_id('facebook', @facebook_user_id)
         break if @service
       end

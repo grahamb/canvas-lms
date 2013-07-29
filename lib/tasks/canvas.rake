@@ -99,6 +99,7 @@ namespace :canvas do
 
     puts "--> Compiling static assets [css]"
     Rake::Task['css:generate'].invoke
+    Rake::Task['css:styleguide'].invoke
 
     puts "--> Compiling static assets [jammit]"
     output = `bundle exec jammit 2>&1`
@@ -157,6 +158,18 @@ namespace :db do
     end
   end
 
+   desc "execute migration_lint script."
+   task :migration_lint do
+     output = `script/migration_lint`
+     exit_status = $?.exitstatus
+     puts output
+     if exit_status != 0
+       raise "migration_lint test failed"
+     else
+       puts "migration_lint test succeeded"
+     end
+   end
+
   namespace :migrate do
     desc "Run all pending predeploy migrations"
     task :predeploy => [:environment, :load_config] do
@@ -170,6 +183,7 @@ namespace :db do
   end
 
   namespace :test do
+    desc "Drop and regenerate the test db by running migrations"
     task :reset => [:environment, :load_config] do
       raise "Run with RAILS_ENV=test" unless Rails.env.test?
       config = ActiveRecord::Base.configurations['test']

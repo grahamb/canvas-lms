@@ -1,4 +1,5 @@
 define [
+  'underscore'
   'i18n!discussions'
   'compiled/discussions/MarkAsReadWatcher'
   'compiled/arr/walk'
@@ -15,14 +16,29 @@ define [
   'compiled/str/convertApiUserContent'
   'jst/_avatar'
   'jst/discussions/_reply_form'
-], (I18n, MarkAsReadWatcher, walk, Backbone, EntryCollection, entryContentPartial, deletedEntriesTemplate, entryWithRepliesTemplate, entryStats, Reply, EntryEditor, htmlEscape, {publish}, convertApiUserContent) ->
+], (_, I18n, MarkAsReadWatcher, walk, Backbone, EntryCollection, entryContentPartial, deletedEntriesTemplate, entryWithRepliesTemplate, entryStats, Reply, EntryEditor, htmlEscape, {publish}, convertApiUserContent) ->
 
   class EntryView extends Backbone.View
+
+    @instances = {}
+
+    @collapseRootEntries = ->
+      _.each @instances, (view) ->
+        view.collapse() unless view.model.get 'parent'
+
+    @expandRootEntries = ->
+      _.each @instances, (view) ->
+        view.expand() unless view.model.get 'parent'
+
+    @setAllReadState = (newReadState) ->
+      _.each @instances, (view) ->
+        view.model.set 'read_state', newReadState
 
     els:
       '.discussion_entry:first': '$entryContent'
       '.replies:first': '$replies'
       '.headerBadges:first': '$headerBadges'
+      '.discussion-read-state-btn:first': '$readStateToggle'
 
     events:
       'click .loadDescendants': 'loadDescendants'
@@ -42,9 +58,20 @@ define [
 
     initialize: ->
       super
+      @constructor.instances[@cid] = this
       @$el.attr 'id', "entry-#{@model.get 'id'}"
       @model.on 'change:deleted', @toggleDeleted
       @model.on 'change:read_state', @toggleReadState
+      @model.on 'change:editor', @render
+      @model.on 'change:editor', (entry) -> entry.trigger('edited')
+
+    toggleRead: (e) ->
+      e.preventDefault()
+      if @model.get('read_state') is 'read'
+        @model.markAsUnread()
+      else
+        @model.markAsRead()
+      EntryView.trigger 'readStateChanged', @model, this
 
     handleDeclarativeEvent: (event) ->
       $el = $ event.currentTarget
@@ -65,15 +92,31 @@ define [
         no
 
     toJSON: ->
-      @model.attributes
+      json = @model.attributes
+      json.edited_at = $.parseFromISO(json.updated_at).datetime_formatted
+      if json.editor
+        json.editor_name = json.editor.display_name
+        json.editor_href = "href=\"#{json.editor.html_url}\""
+      else
+        json.editor_name = I18n.t 'unknown', 'Unknown'
+        json.editor_href = ""
+      json
 
     toggleReadState: (model, read_state) =>
+      @setToggleTooltip()
       @$entryContent.toggleClass 'unread', read_state is 'unread'
       @$entryContent.toggleClass 'read', read_state is 'read'
 
     toggleCollapsed: (event, $el)->
       @addCountsToHeader() unless @addedCountsToHeader
       @$el.toggleClass 'collapsed'
+
+    expand: ->
+      @$el.removeClass 'collapsed'
+
+    collapse: ->
+      @addCountsToHeader() unless @addedCountsToHeader
+      @$el.addClass 'collapsed'
 
     addCountsToHeader: ->
       stats = @countPosterity()
@@ -88,10 +131,24 @@ define [
 
     toggleDeleted: (model, deleted) =>
       @$entryContent.toggleClass 'deleted-discussion-entry', deleted
+      if deleted
+        @model.set('updated_at', (new Date).toISOString())
+        @model.set('editor', ENV.current_user)
+
+    setToggleTooltip: ->
+      tooltip = if @model.get('read_state') is 'unread'
+        I18n.t('mark_as_read', 'Mark as Read')
+      else
+        I18n.t('mark_as_unread', 'Mark as Unread')
+
+      @$readStateToggle.attr('title', tooltip)
+
 
     afterRender: ->
       super
-      if @model.get('read_state') is 'unread'
+      @collapse() if @options.collapsed
+      @setToggleTooltip()
+      if @model.get('read_state') is 'unread' and !@model.get('forced_read_state') and !ENV.DISCUSSION.MANUAL_MARK_AS_READ
         @readMarker ?= new MarkAsReadWatcher this
         # this is throttled so calling it here is okay
         MarkAsReadWatcher.checkForVisibleEntries()
@@ -111,6 +168,7 @@ define [
         descendants: descendants
         collection: page
         threaded: @options.threaded
+        showMoreDescendants: @options.showMoreDescendants
       @treeView.render()
 
     renderDescendantsLink: ->
@@ -147,7 +205,7 @@ define [
       @editor.edit() if not @editor.editing
 
     addReply: (event, $el) ->
-      @reply ?= new Reply this
+      @reply ?= new Reply this, focus: true
       @model.set 'notification', ''
       @reply.edit()
       @reply.on 'save', (entry) =>
@@ -155,11 +213,14 @@ define [
         @treeView.collection.add entry
         @treeView.collection.fullCollection.add entry
         @trigger 'addReply'
+        EntryView.trigger 'addReply', entry
 
     addReplyAttachment: (event, $el) ->
+      event.preventDefault()
       @reply.addAttachment($el)
 
     removeReplyAttachment: (event, $el) ->
+      event.preventDefault()
       @reply.removeAttachment($el)
 
     format: (attr, value) ->
@@ -173,3 +234,4 @@ define [
       else
         htmlEscape value
 
+  _.extend EntryView, Backbone.Events

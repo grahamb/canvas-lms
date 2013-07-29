@@ -1,4 +1,7 @@
-define ['Backbone'], ({View}, _) ->
+define [
+  'compiled/views/InputView'
+  'vendor/jquery.placeholder'
+], (InputView) ->
 
   ##
   # Makes an input field that emits `input` and `select` events, and
@@ -12,21 +15,24 @@ define ['Backbone'], ({View}, _) ->
   #   parameters.
   #
   #   enter: Emits when the user hits enter in the field
-  class InputFilterView extends View
-
-    tagName: 'input'
+  class InputFilterView extends InputView
 
     events: {'keyup', 'change'}
 
     defaults:
       onInputDelay: 200
+      modelAttribute: 'filter'
+      minLength: 3
 
     onInput: =>
-      @trigger 'input', @el.value
+      if @el.value isnt @lastValue
+        @updateModel()
+        @trigger 'input', @el.value
+      @lastValue = @el.value
 
     onEnter: ->
       @el.select()
-      @trigger 'enter'
+      @trigger 'enter', @el.value
 
     keyup: (event) ->
       clearTimeout @onInputTimer
@@ -35,3 +41,7 @@ define ['Backbone'], ({View}, _) ->
       null
 
     change: @::keyup
+
+    afterRender: ->
+      @$el.placeholder()
+

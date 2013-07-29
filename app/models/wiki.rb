@@ -32,6 +32,8 @@ class Wiki < ActiveRecord::Base
   has_many :wiki_pages, :dependent => :destroy
   after_save :update_contexts
 
+  DEFAULT_FRONT_PAGE_URL = 'front-page'
+
   def update_contexts
     self.context.try(:touch)
   end
@@ -56,10 +58,41 @@ class Wiki < ActiveRecord::Base
     end
   end
   
-  def wiki_page
+  def front_page
+    return nil unless has_front_page?
     # TODO i18n
     t :front_page_name, "Front Page"
-    self.wiki_pages.find_by_url("front-page") || self.wiki_pages.build(:title => "Front Page", :url => 'front-page')
+    url = self.get_front_page_url
+    self.wiki_pages.find_by_url(url) || self.wiki_pages.build(:title => "Front Page", :url => url)
+  end
+
+  def has_front_page?
+    !self.has_no_front_page
+  end
+
+  def get_front_page_url
+    return nil unless self.has_front_page?
+    self.front_page_url || DEFAULT_FRONT_PAGE_URL
+  end
+
+  def unset_front_page!
+    if self.context.is_a?(Course) && self.context.default_view == 'wiki'
+      self.context.default_view = 'feed'
+      self.context.save
+    end
+
+    self.front_page_url = nil
+    self.has_no_front_page = true
+    self.save
+  end
+
+  def set_front_page_url!(url)
+    return false if url.blank?
+    return true if self.has_front_page? && self.front_page_url == url
+
+    self.has_no_front_page = false
+    self.front_page_url = url
+    self.save
   end
 
   def context
@@ -98,7 +131,11 @@ class Wiki < ActiveRecord::Base
       # TODO i18n
       t :default_course_wiki_name, "%{course_name} Wiki", :course_name => nil
       t :default_group_wiki_name, "%{group_name} Wiki", :group_name => nil
-      context.wiki = wiki = Wiki.create!(:title => "#{context.name} Wiki")
+
+      self.extend TextHelper
+      name = truncate_text(context.name, {:max_length => 200, :ellipsis => ''})
+
+      context.wiki = wiki = Wiki.create!(:title => "#{name} Wiki")
       context.save!
       wiki
     end

@@ -83,6 +83,7 @@ class SectionsController < ApplicationController
       @section.sis_source_id = sis_section_id if api_request? && sis_section_id.present? && @context.root_account.grants_right?(@current_user, session, :manage_sis)
       respond_to do |format|
         if @section.save
+          @context.touch
           flash[:notice] = t('section_created', "Section successfully created!")
           format.html { redirect_to course_settings_url(@context) }
           format.json { render :json => (api_request? ? section_json(@section, @current_user, session, []) : @section.to_json) }
@@ -185,6 +186,7 @@ class SectionsController < ApplicationController
       end
       respond_to do |format|
         if @section.update_attributes(params[:course_section])
+          @context.touch
           flash[:notice] = t('section_updated', "Section successfully updated!")
           format.html { redirect_to course_section_url(@context, @section) }
           format.json { render :json => (api_request? ? section_json(@section, @current_user, session, []) : @section.to_json) }
@@ -206,10 +208,10 @@ class SectionsController < ApplicationController
       respond_to do |format|
         format.html do
           add_crumb(@section.name, named_context_url(@context, :context_section_url, @section))
-          @enrollments_count = @section.enrollments.not_fake.scoped(:conditions => { :workflow_state => 'active' }).count
-          @completed_enrollments_count = @section.enrollments.not_fake.scoped(:conditions => { :workflow_state => 'completed' }).count
-          @pending_enrollments_count = @section.enrollments.not_fake.scoped(:conditions => { :workflow_state => %w{invited pending} }).count
-          @student_enrollments_count = @section.enrollments.not_fake.scoped(:conditions => { :type => 'StudentEnrollment' }).count
+          @enrollments_count = @section.enrollments.not_fake.where(:workflow_state => 'active').count
+          @completed_enrollments_count = @section.enrollments.not_fake.where(:workflow_state => 'completed').count
+          @pending_enrollments_count = @section.enrollments.not_fake.where(:workflow_state => %w{invited pending}).count
+          @student_enrollments_count = @section.enrollments.not_fake.where(:type => 'StudentEnrollment').count
           js_env(
             :PERMISSIONS => {
               :manage_students => @context.grants_right?(@current_user, session, :manage_students) || @context.grants_right?(@current_user, session, :manage_admin_users),
@@ -230,6 +232,7 @@ class SectionsController < ApplicationController
       respond_to do |format|
         if @section.enrollments.not_fake.empty?
           @section.destroy
+          @context.touch
           flash[:notice] = t('section_deleted', "Course section successfully deleted!")
           format.html { redirect_to course_settings_url(@context) }
           format.json { render :json => (api_request? ? section_json(@section, @current_user, session, []) : @section.to_json) }

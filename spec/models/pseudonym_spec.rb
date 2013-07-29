@@ -32,6 +32,14 @@ describe Pseudonym do
     @pseudonym.save!
   end
 
+  it "should allow apostrophes in usernames" do
+    pseudonym = Pseudonym.new(:unique_id => "o'brien@example.com",
+                              :password => 'password',
+                              :password_confirmation => 'password')
+    pseudonym.user_id = 1
+    pseudonym.should be_valid
+  end
+
   it "should validate the presence of user and account ids" do
     u = User.create!
     p = Pseudonym.new(:unique_id => 'cody@instructure.com')
@@ -65,6 +73,20 @@ describe Pseudonym do
     p1.save!
     # Should allow creating a new active one if the others are deleted
     Pseudonym.create!(:unique_id => 'cody@instructure.com', :user => u)
+  end
+
+  it "should share a root_account_id with its account" do
+    pseudonym = Pseudonym.new
+    pseudonym.stubs(:account).returns(stub(root_account_id: 1, id: 2))
+
+    pseudonym.root_account_id.should == 1
+  end
+
+  it "should use its account_id as a root_account_id if its account has no root" do
+    pseudonym = Pseudonym.new
+    pseudonym.stubs(:account).returns(stub(root_account_id: nil, id: 1))
+
+    pseudonym.root_account_id.should == 1
   end
   
   it "should find the correct pseudonym for logins" do
@@ -116,13 +138,13 @@ describe Pseudonym do
     @user.reload
     @user.user_account_associations.should == []
   end
-  
+
   it "should allow deleting pseudonyms" do
     user_with_pseudonym(:active_all => true)
     @pseudonym.destroy(true).should eql(true)
     @pseudonym.should be_deleted
   end
-  
+
   it "should not allow deleting system-generated pseudonyms by default" do
     user_with_pseudonym(:active_all => true)
     @pseudonym.sis_user_id = 'something_cool'
@@ -131,7 +153,7 @@ describe Pseudonym do
     lambda{ @pseudonym.destroy}.should raise_error("Cannot delete system-generated pseudonyms")
     @pseudonym.should_not be_deleted
   end
-  
+
   it "should not allow deleting system-generated pseudonyms by default" do
     user_with_pseudonym(:active_all => true)
     @pseudonym.sis_user_id = 'something_cool'
@@ -189,6 +211,7 @@ describe Pseudonym do
       @aac.reload.update_attributes(:auth_port => 637)
       @aac.last_timeout_failure.should be_nil
       Net::LDAP.any_instance.expects(:bind_as).returns(true)
+      @pseudonym.reload
       @pseudonym.ldap_bind_result('test').should be_true
     end
 
@@ -205,7 +228,16 @@ describe Pseudonym do
     @pseudonym.sis_ssha = '{SSHA}garbage'
     @pseudonym.valid_ssha?('garbage').should be_false
   end
-  
+
+  it "should not attempt validating a blank password" do
+    pseudonym_model
+    @pseudonym.expects(:sis_ssha).never
+    @pseudonym.valid_ssha?('')
+
+    @pseudonym.expects(:ldap_bind_result).never
+    @pseudonym.valid_ldap_credentials?('')
+  end
+
   context "Needs a pseudonym with an active user" do
     before do
       user_model
@@ -237,9 +269,9 @@ describe Pseudonym do
       @pseudonym.reload
       @pseudonym.user.email_channel.path.should eql('admin@example.com')
     end
-    
+
     it "should offer the user sms if there is one" do
-      communication_channel_model(:path_type => 'sms', :user_id => @user.id)
+      communication_channel_model(:path_type => 'sms')
       @user.communication_channels << @cc
       @user.save!
       @user.sms.should eql(@cc.path)
@@ -247,13 +279,13 @@ describe Pseudonym do
     end
 
     it "should be able to change the user sms" do
-      communication_channel_model(:path_type => 'sms', :user_id => @user.id, :path => 'admin@example.com')
+      communication_channel_model(:path_type => 'sms', :path => 'admin@example.com')
       @pseudonym.sms = @cc
       @pseudonym.sms.should eql('admin@example.com')
       @pseudonym.user.sms.should eql('admin@example.com')
     end
   end
-  
+
   it "should determine if the password is managed" do
     u = User.create!
     p = Pseudonym.create!(:unique_id => 'jt@instructure.com', :user => u)
@@ -331,5 +363,35 @@ describe Pseudonym do
     end
   end
 
+  describe '#verify_unique_sis_user_id' do
+
+    it 'is true if there is no sis_user_id' do
+      Pseudonym.new.verify_unique_sis_user_id.should be_true
+    end
+
+    describe 'when a pseudonym already exists' do
+
+      let(:sis_user_id) { "1234554321" }
+
+      before do
+        user_with_pseudonym
+        @pseudonym.sis_user_id = sis_user_id
+        @pseudonym.save!
+      end
+
+      it 'returns false if the sis_user_id is already taken' do
+        new_pseudonym = Pseudonym.new(:account => @pseudonym.account)
+        new_pseudonym.sis_user_id = sis_user_id
+        new_pseudonym.verify_unique_sis_user_id.should be_false
+      end
+
+      it 'also can validate if the new sis_user_id is an integer' do
+        new_pseudonym = Pseudonym.new(:account => @pseudonym.account)
+        new_pseudonym.sis_user_id = sis_user_id.to_i
+        new_pseudonym.verify_unique_sis_user_id.should be_false
+      end
+
+    end
+  end
 end
 

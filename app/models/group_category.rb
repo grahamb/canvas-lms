@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011 Instructure, Inc.
+# Copyright (C) 2011 - 2013 Instructure, Inc.
 #
 # This file is part of Canvas.
 #
@@ -21,15 +21,14 @@ class GroupCategory < ActiveRecord::Base
   belongs_to :context, :polymorphic => true
   has_many :groups, :dependent => :destroy
   has_many :assignments, :dependent => :nullify
+  has_many :progresses, :as => 'context', :dependent => :destroy
+  has_one :current_progress, :as => 'context', :class_name => 'Progress', :conditions => "workflow_state IN ('queued','running')", :order => 'created_at'
   validates_length_of :name, :maximum => maximum_string_length, :allow_nil => true, :allow_blank => true
+  validates_numericality_of :group_limit, :greater_than => 1, :allow_nil => true
 
-  named_scope :active, lambda {
-    { :conditions => ['group_categories.deleted_at is null'] }
-  }
+  scope :active, where(:deleted_at => nil)
 
-  named_scope :other_than, lambda{ |cat|
-    { :conditions => ['group_categories.id != ?', cat.id || 0] }
-  }
+  scope :other_than, lambda { |cat| where("group_categories.id<>?", cat.id || 0) }
 
   class << self
     def protected_name_for_context?(name, context)
@@ -148,4 +147,76 @@ class GroupCategory < ActiveRecord::Base
     self.deleted_at = Time.now
     self.save
   end
+
+  def distribute_members_among_groups(members, groups)
+    return [] if groups.empty?
+    new_memberships = []
+    touched_groups = [].to_set
+
+    groups_by_size = {}
+    groups.each do |group|
+      size = group.users.size
+      groups_by_size[size] ||= []
+      groups_by_size[size] << group
+    end
+    smallest_group_size = groups_by_size.keys.min
+    members_count = members.size
+
+    members.sort_by{ rand }.each_with_index do |member, i|
+      group = groups_by_size[smallest_group_size].first
+      membership = group.add_user(member)
+      if membership.valid?
+        new_memberships << membership
+        touched_groups << group.id
+
+        # successfully added member to group, move it to the new size bucket
+        groups_by_size[smallest_group_size].shift
+        groups_by_size[smallest_group_size + 1] ||= []
+        groups_by_size[smallest_group_size + 1] << group
+
+        # was that the last group of that size?
+        if groups_by_size[smallest_group_size].empty?
+          groups_by_size.delete(smallest_group_size)
+          smallest_group_size += 1
+        end
+      end
+      update_progress(i, members_count)
+    end
+    Group.where(:id => touched_groups.to_a).update_all(:updated_at => Time.now.utc) unless touched_groups.empty?
+    complete_progress
+    return new_memberships
+  end
+
+  def assign_unassigned_members
+    potential_members = context.users_not_in_groups(groups.active)
+    distribute_members_among_groups(potential_members, groups.active)
+  end
+
+  def assign_unassigned_members_in_background
+    start_progress
+    send_later_enqueue_args :assign_unassigned_members, :priority => Delayed::LOW_PRIORITY
+  end
+
+  protected
+
+  def start_progress
+    self.current_progress ||= progresses.build(:tag => 'assign_unassigned_members', :completion => 0)
+    current_progress.start
+  end
+
+  def update_progress(i, total)
+    return unless current_progress
+    do_progress_update = i % 100 == 0
+    if do_progress_update
+      current_progress.calculate_completion! i, total
+    end
+  end
+
+  def complete_progress
+    return unless current_progress
+    current_progress.complete
+    current_progress.save!
+    current_progress.reload
+  end
+
 end

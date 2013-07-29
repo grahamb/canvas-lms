@@ -15,8 +15,15 @@
 # You should have received a copy of the GNU Affero General Public License along
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 #
-
 class ContentTag < ActiveRecord::Base
+  class LastLinkToOutcomeNotDestroyed < StandardError
+    attr_reader :alignment
+    def initialize( alignment )
+      super( 'Link is the last link to an aligned outcome.' +
+           'Remove the alignment and then try again')
+      @alignment = alignment
+    end 
+  end
   include Workflow
   belongs_to :content, :polymorphic => true
   belongs_to :context, :polymorphic => true
@@ -39,6 +46,8 @@ class ContentTag < ActiveRecord::Base
   include CustomValidations
   validates_as_url :url
 
+  acts_as_list :scope => :context_module
+
   attr_accessible :learning_outcome, :context, :tag_type, :mastery_score, :content_asset_string, :content, :title, :indent, :position, :url, :new_tab, :content_type
 
   set_policy do
@@ -47,13 +56,17 @@ class ContentTag < ActiveRecord::Base
   end
   
   workflow do
-    state :active
+    state :active do
+      event :unpublish, :transitions_to => :unpublished
+    end
+    state :unpublished do
+      event :publish, :transitions_to => :active
+    end
     state :deleted
   end
-  
-  named_scope :active, lambda{
-    {:conditions => ['content_tags.workflow_state != ?', 'deleted'] }
-  }
+
+  scope :active, where(:workflow_state => 'active')
+  scope :not_deleted, where("content_tags.workflow_state<>'deleted'")
 
   attr_accessor :skip_touch
   def touch_context_module
@@ -61,13 +74,13 @@ class ContentTag < ActiveRecord::Base
   end
   
   def self.touch_context_modules(ids=[])
-    ContextModule.update_all({:updated_at => Time.now.utc}, {:id => ids}) unless ids.empty?
+    ContextModule.where(:id => ids).update_all(:updated_at => Time.now.utc) unless ids.empty?
     true
   end
   
   def touch_context_if_learning_outcome
     if (self.tag_type == 'learning_outcome_association' || self.tag_type == 'learning_outcome') && skip_touch.blank?
-      self.context_type.constantize.update_all({:updated_at => Time.now.utc}, {:id => self.context_id}) 
+      self.context_type.constantize.where(:id => self.context_id).update_all(:updated_at => Time.now.utc)
     end
   end
   
@@ -103,7 +116,7 @@ class ContentTag < ActiveRecord::Base
     content_ids.each do |type, ids|
       klass = type.constantize
       if klass.new.respond_to?(:could_be_locked=)
-        klass.update_all({ :could_be_locked => true }, { :id => ids })
+        klass.where(:id => ids).update_all(:could_be_locked => true)
       end
     end
   end
@@ -154,7 +167,7 @@ class ContentTag < ActiveRecord::Base
   end
   
   def update_asset_name!
-    return if !self.sync_title_to_asset_title?
+    return unless self.sync_title_to_asset_title?
     correct_context = self.content && self.content.respond_to?(:context) && self.content.context == self.context
     if correct_context
       if self.content.respond_to?("name=") && self.content.respond_to?("name") && self.content.name != self.title
@@ -163,6 +176,29 @@ class ContentTag < ActiveRecord::Base
         self.content.update_attribute(:title, self.title)
       elsif self.content.respond_to?("display_name=") && self.content.display_name != self.title
         self.content.update_attribute(:display_name, self.title)
+      end
+    end
+  end
+
+  def update_asset_workflow_state!
+    return unless self.sync_workflow_state_to_asset?
+    correct_context = self.content && self.content.respond_to?(:context) && self.content.context == self.context
+    if correct_context
+      asset_workflow_state = nil
+      if self.unpublished? && self.content.respond_to?(:unpublished?)
+        asset_workflow_state = 'unpublished'
+      elsif self.active?
+        if self.content.respond_to?(:active?)
+          asset_workflow_state = 'active'
+        elsif self.content.respond_to?(:available?)
+          asset_workflow_state = 'available'
+        elsif self.content.respond_to?(:published?)
+          asset_workflow_state = 'published'
+        end
+      end
+      if asset_workflow_state
+        self.content.update_attribute(:workflow_state, asset_workflow_state)
+        self.class.update_for(self.content)
       end
     end
   end
@@ -179,8 +215,8 @@ class ContentTag < ActiveRecord::Base
       # and there are no other links to the same outcome in the same context...
       outcome = self.content
       other_link = ContentTag.learning_outcome_links.active.
-        scoped(:conditions => {:context_type => self.context_type, :context_id => self.context_id, :content_id => outcome.id}).
-        scoped(:conditions => ["id != ?", self.id]).first
+        where(:context_type => self.context_type, :context_id => self.context_id, :content_id => outcome).
+        where("id<>?", self).first
       if !other_link
         # and there are alignments to the outcome (in the link's context for
         # foreign links, in any context for native links)
@@ -190,11 +226,9 @@ class ContentTag < ActiveRecord::Base
           alignment_conditions[:context_id] = self.context_id
           alignment_conditions[:context_type] = self.context_type
         end
-        alignment = ContentTag.learning_outcome_alignments.scoped(:conditions => alignment_conditions).first
-        if alignment
-          # then don't let them delete the link
-          raise ActiveRecord::RecordNotSaved
-        end
+        alignment = ContentTag.learning_outcome_alignments.where(alignment_conditions).first
+        # then don't let them delete the link
+        raise LastLinkToOutcomeNotDestroyed.new(alignment) if alignment
       end
     end
 
@@ -212,29 +246,47 @@ class ContentTag < ActiveRecord::Base
     true
   end
 
-  def locked_for?(user, deep_check=false)
-    self.context_module.locked_for?(user, self, deep_check)
+  def locked_for?(user, opts={})
+    self.context_module.locked_for?(user, opts.merge({:tag => self}))
   end
   
-  def available_for?(user, deep_check=false)
-    self.context_module.available_for?(user, self, deep_check)
+  def available_for?(user, opts={})
+    self.context_module.available_for?(user, opts.merge({:tag => self}))
   end
   
   def self.update_for(asset)
-    tags = ContentTag.find(:all, :conditions => ['content_id = ? AND content_type = ?', asset.id, asset.class.to_s], :select => 'id, tag_type, content_type, context_module_id')
-    tag_ids = tags.select{|t| t.sync_title_to_asset_title? }.map(&:id)
+    tags = ContentTag.where(:content_id => asset, :content_type => asset.class.to_s).not_deleted.select([:id, :tag_type, :content_type, :context_module_id]).all
     module_ids = tags.select{|t| t.context_module_id }.map(&:context_module_id)
+
+    # update title
+    tag_ids = tags.select{|t| t.sync_title_to_asset_title? }.map(&:id)
     attr_hash = {:updated_at => Time.now.utc}
     {:display_name => :title, :name => :title, :title => :title}.each do |attr, val|
       attr_hash[val] = asset.send(attr) if asset.respond_to?(attr)
     end
-    attr_hash[:workflow_state] = 'deleted' if asset.respond_to?(:workflow_state) && asset.workflow_state == 'deleted'
-    ContentTag.update_all(attr_hash, {:id => tag_ids})
+    ContentTag.where(:id => tag_ids).update_all(attr_hash)
+
+    # update workflow_state
+    tag_ids = tags.select{|t| t.sync_workflow_state_to_asset? }.map(&:id)
+    attr_hash = {:updated_at => Time.now.utc}
+    if asset.respond_to?(:workflow_state)
+      if ['active', 'available', 'published'].include?(asset.workflow_state)
+        attr_hash[:workflow_state] = 'active'
+      elsif ['unpublished', 'deleted'].include?(asset.workflow_state)
+        attr_hash[:workflow_state] = asset.workflow_state
+      end
+    end
+    ContentTag.where(:id => tag_ids).update_all(attr_hash) if attr_hash[:workflow_state]
+
     ContentTag.touch_context_modules(module_ids)
   end
   
   def sync_title_to_asset_title?
     self.tag_type != "learning_outcome_association" && !['ContextExternalTool', 'Attachment'].member?(self.content_type)
+  end
+
+  def sync_workflow_state_to_asset?
+    ['Assignment', 'WikiPage'].include?(self.content_type)
   end
   
   def context_module_action(user, action, points=nil)
@@ -303,14 +355,12 @@ class ContentTag < ActiveRecord::Base
     dup
   end
   
-  named_scope :for_tagged_url, lambda{|url, tag|
-    {:conditions => ['content_tags.url = ? AND content_tags.tag = ?', url, tag] }
-  }
-  named_scope :for_context, lambda{|context|
+  scope :for_tagged_url, lambda { |url, tag| where(:url => url, :tag => tag) }
+  scope :for_context, lambda { |context|
     case context
     when Account
-      { :select => 'content_tags.*',
-        :joins => "INNER JOIN (
+      select("content_tags.*").
+          joins("INNER JOIN (
             SELECT DISTINCT ct.id AS content_tag_id FROM content_tags AS ct
             INNER JOIN course_account_associations AS caa ON caa.course_id = ct.context_id
               AND ct.context_type = 'Course'
@@ -318,44 +368,20 @@ class ContentTag < ActiveRecord::Base
           UNION
             SELECT ct.id AS content_tag_id FROM content_tags AS ct
             WHERE ct.context_id = #{context.id} AND context_type = 'Account')
-          AS related_content_tags ON related_content_tags.content_tag_id = content_tags.id" }
+          AS related_content_tags ON related_content_tags.content_tag_id = content_tags.id")
     else
-      {:conditions => ['content_tags.context_type = ? AND content_tags.context_id = ?', context.class.to_s, context.id]}
+      where(:context_type => context.class.to_s, :context_id => context)
     end
   }
-  named_scope :include_progressions, lambda{
-    { :include => {:context_module => :context_module_progressions} }
-  }
-  named_scope :learning_outcome_alignments, lambda{
-    { :conditions => {:tag_type => 'learning_outcome'} }
-  }
-  named_scope :learning_outcome_links, lambda{
-    { :conditions => {:tag_type => 'learning_outcome_association', :associated_asset_type => 'LearningOutcomeGroup', :content_type => 'LearningOutcome'} }
-  }
+  scope :learning_outcome_alignments, where(:tag_type => 'learning_outcome')
+  scope :learning_outcome_links, where(:tag_type => 'learning_outcome_association', :associated_asset_type => 'LearningOutcomeGroup', :content_type => 'LearningOutcome')
 
   # only intended for learning outcome links
   def self.outcome_title_order_by_clause
     best_unicode_collation_key("learning_outcomes.short_description")
   end
 
-  module OutcomeTitleExtension
-    # only works with scopes i.e. named_scopes and scoped()
-    def find(*args)
-      options = args.last.is_a?(::Hash) ? args.last : {}
-      scope = scope(:find)
-      select = if options[:select]
-                 options[:select]
-               elsif scope[:select]
-                 scope[:select]
-               else
-                 "#{proxy_scope.quoted_table_name}.*"
-               end
-      options[:select] = select + ', ' + ContentTag.outcome_title_order_by_clause
-      super args.first, options
-    end
-  end
-
   def self.order_by_outcome_title
-    scoped(:include => :learning_outcome_content, :order => outcome_title_order_by_clause, :extend => OutcomeTitleExtension)
+    includes(:learning_outcome_content).order(outcome_title_order_by_clause)
   end
 end

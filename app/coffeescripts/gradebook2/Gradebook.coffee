@@ -1,5 +1,7 @@
 # This class both creates the slickgrid instance, and acts as the data source for that instance.
 define [
+  'compiled/gradebook2/TotalColumnHeaderView'
+  'compiled/util/round'
   'compiled/views/InputFilterView'
   'i18n!gradebook2'
   'compiled/gradebook2/GRADEBOOK_TRANSLATIONS'
@@ -31,7 +33,7 @@ define [
   'jqueryui/sortable'
   'compiled/jquery.kylemenu'
   'compiled/jquery/fixDialogButtons'
-], (InputFilterView, I18n, GRADEBOOK_TRANSLATIONS, $, _, GradeCalculator, userSettings, Spinner, MultiGrid, SubmissionDetailsDialog, AssignmentGroupWeightsDialog, SubmissionCell, GradebookHeaderMenu, htmlEscape, gradebook_uploads_form, sectionToShowMenuTemplate, columnHeaderTemplate, groupTotalCellTemplate, rowStudentNameTemplate) ->
+], (TotalColumnHeaderView, round, InputFilterView, I18n, GRADEBOOK_TRANSLATIONS, $, _, GradeCalculator, userSettings, Spinner, MultiGrid, SubmissionDetailsDialog, AssignmentGroupWeightsDialog, SubmissionCell, GradebookHeaderMenu, htmlEscape, gradebook_uploads_form, sectionToShowMenuTemplate, columnHeaderTemplate, groupTotalCellTemplate, rowStudentNameTemplate) ->
 
   class Gradebook
     columnWidths =
@@ -47,11 +49,12 @@ define [
         min: 85
         max: 100
 
+    DISPLAY_PRECISION = 2
+
     constructor: (@options) ->
       @chunk_start = 0
       @students = {}
       @rows = []
-      @studentsPage = 1
       @sortFn = (student) -> student.sortable_name
       @assignmentsToHide = userSettings.contextGet('hidden_columns') || []
       @sectionToShow = userSettings.contextGet 'grading_show_only_section'
@@ -70,12 +73,31 @@ define [
       else
         'students_url'
 
-      promise = $.when(
-        $.ajaxJSON( @options[enrollmentsUrl], "GET"),
-        $.ajaxJSON( @options.assignment_groups_url, "GET", {}, @gotAssignmentGroups),
-        $.ajaxJSON( @options.sections_url, "GET", {}, @gotSections)
-      ).then ([students, status, xhr]) =>
-        @gotChunkOfStudents(students, xhr)
+      # getting all the enrollments for a course via the api in the polite way
+      # is too slow, so we're going to cheat.
+      $.when($.ajaxJSON(@options[enrollmentsUrl], "GET")
+      , $.ajaxJSON(@options.assignment_groups_url, "GET", {}, @gotAssignmentGroups)
+      , $.ajaxJSON( @options.sections_url, "GET", {}, @gotSections))
+      .then ([students, status, xhr]) =>
+        @gotChunkOfStudents students
+
+        paginationLinks = xhr.getResponseHeader('Link')
+        lastLink = paginationLinks.match(/<[^>]+>; *rel="last"/)
+        unless lastLink?
+          @gotAllStudents()
+          return
+        lastPage = lastLink[0].match(/page=(\d+)/)[1]
+        lastPage = parseInt lastPage, 10
+
+        fetchEnrollments = (page) =>
+          $.ajaxJSON @options[enrollmentsUrl], "GET", {page}
+        dfds = (fetchEnrollments(page) for page in [2..lastPage])
+        $.when(dfds...).then (responses...) =>
+          if dfds.length == 1
+            @gotChunkOfStudents responses[0]
+          else
+            @gotChunkOfStudents(students) for [students, x, y] in responses
+          @gotAllStudents()
 
       @spinner = new Spinner()
       $(@spinner.spin().el).css(
@@ -107,7 +129,7 @@ define [
         @sections[section.id] = section
       @sections_enabled = sections.length > 1
 
-    gotChunkOfStudents: (studentEnrollments, xhr) =>
+    gotChunkOfStudents: (studentEnrollments) =>
       for studentEnrollment in studentEnrollments
         student = studentEnrollment.user
         student.enrollment = studentEnrollment
@@ -115,18 +137,13 @@ define [
         @students[student.id].sections ||= []
         @students[student.id].sections.push(studentEnrollment.course_section_id)
 
-      link = xhr.getResponseHeader('Link')
-      if link && link.match /rel="next"/
-        @studentsPage += 1
-        $.ajaxJSON( @options.students_url, "GET", { "page": @studentsPage}, @gotChunkOfStudents)
-      else
-        @gotAllStudents()
-
     gotAllStudents: ->
       for id, student of @students
         student.computed_current_score ||= 0
         student.computed_final_score ||= 0
         student.secondary_identifier = student.sis_login_id || student.login_id
+        # [CANVAS-188] Define data for SIS ID column (use dash if not available)
+        student.sis_id = student.sis_user_id || '-'
 
         if @sections_enabled
           mySections = (@sections[sectionId].name for sectionId in student.sections when @sections[sectionId])
@@ -147,42 +164,94 @@ define [
       @getSubmissionsChunks()
       @initHeader()
 
-    arrangeColumnsBy: (newThingToArrangeBy) =>
-      if newThingToArrangeBy and newThingToArrangeBy != @_sortColumnsBy
-        @$columnArrangementTogglers.each ->
-          $(this).closest('li').showIf $(this).data('arrangeColumnsBy') isnt newThingToArrangeBy
-        @_sortColumnsBy = newThingToArrangeBy
-        userSettings[ if newThingToArrangeBy is 'due_date' then 'contextSet' else 'contextRemove']('sort_grade_colums_by', newThingToArrangeBy)
-        columns = @gradeGrid.getColumns()
-        columns.sort @columnSortFn
-        @gradeGrid.setColumns(columns)
-        @fixColumnReordering()
-        @buildRows()
-      @_sortColumnsBy ||= userSettings.contextGet('sort_grade_colums_by') || 'assignment_group'
+    defaultSortType: 'assignment_group'
+      
 
-    columnSortFn: (a,b) =>
-      return -1 if b.type is 'total_grade'
-      return  1 if a.type is 'total_grade'
-      return -1 if b.type is 'assignment_group' and a.type isnt 'assignment_group'
-      return  1 if a.type is 'assignment_group' and b.type isnt 'assignment_group'
-      if a.type is 'assignment_group' and b.type is 'assignment_group'
-        return a.object.position - b.object.position
-      else if a.type is 'assignment' and b.type is 'assignment'
-        if @arrangeColumnsBy() is 'assignment_group'
-          diffOfAssignmentGroupPosition = a.object.assignment_group.position - b.object.assignment_group.position
-          diffOfAssignmentPosition = a.object.position - b.object.position
+    getStoredSortOrder: =>
+      userSettings.contextGet('sort_grade_columns_by') || { sortType: @defaultSortType }
 
-          # order first by assignment_group position and then by assignment position
-          # will work when there are less than 1000000 assignments in an assignment_group
-          return (diffOfAssignmentGroupPosition * 1000000) + diffOfAssignmentPosition
+    setStoredSortOrder: (newSortOrder) =>
+      if newSortOrder.sortType == @defaultSortType
+        userSettings.contextRemove('sort_grade_columns_by')
+      else
+        userSettings.contextSet('sort_grade_columns_by', newSortOrder)
+
+    storeCustomColumnOrder: =>
+      newSortOrder =
+        sortType: 'custom'
+        customOrder: []
+      columns = @gradeGrid.getColumns()
+      assignment_columns = _.filter(columns, (c) -> c.type is 'assignment')
+      newSortOrder.customOrder = _.map(assignment_columns, (a) -> a.object.id)
+      @setStoredSortOrder(newSortOrder)
+
+    setArrangementTogglersVisibility: (newSortOrder) =>
+      @$columnArrangementTogglers.each ->
+        $(this).closest('li').showIf $(this).data('arrangeColumnsBy') isnt newSortOrder.sortType
+
+    arrangeColumnsBy: (newSortOrder) =>
+      @setArrangementTogglersVisibility(newSortOrder)
+      @setStoredSortOrder(newSortOrder)
+
+      columns = @gradeGrid.getColumns()
+      columns.sort @makeColumnSortFn(newSortOrder)
+      @gradeGrid.setColumns(columns)
+
+      @fixColumnReordering()
+      @buildRows()
+
+    makeColumnSortFn: (sortOrder) =>
+      fn = switch sortOrder.sortType
+        when 'assignment_group' then @compareAssignmentPositions
+        when 'due_date' then @compareAssignmentDueDates
+        when 'custom' then @makeCompareAssignmentCustomOrderFn(sortOrder)
+        else throw "unhandled column sort condition"
+      @wrapColumnSortFn(fn)
+
+    compareAssignmentPositions: (a, b) =>
+      diffOfAssignmentGroupPosition = a.object.assignment_group.position - b.object.assignment_group.position
+      diffOfAssignmentPosition = a.object.position - b.object.position
+
+      # order first by assignment_group position and then by assignment position
+      # will work when there are less than 1000000 assignments in an assignment_group
+      return (diffOfAssignmentGroupPosition * 1000000) + diffOfAssignmentPosition
+
+    compareAssignmentDueDates: (a, b) =>
+      aDate = a.object.due_at?.timestamp or Number.MAX_VALUE
+      bDate = b.object.due_at?.timestamp or Number.MAX_VALUE
+      if aDate is bDate
+        return 0 if a.object.name is b.object.name
+        return (if a.object.name > b.object.name then 1 else -1)
+      return aDate - bDate
+
+    makeCompareAssignmentCustomOrderFn: (sortOrder) =>
+      sortMap = {}
+      indexCounter = 0
+      for assignmentId in sortOrder.customOrder
+        sortMap[String(assignmentId)] = indexCounter
+        indexCounter += 1
+      return (a, b) =>
+        aIndex = sortMap[String(a.object.id)]
+        bIndex = sortMap[String(b.object.id)]
+        if aIndex? and bIndex?
+          return aIndex - bIndex
+        # if there's a new assignment and its order has not been stored, it should come at the end
+        else if aIndex? and not bIndex?
+          return -1
+        else if bIndex?
+          return 1
         else
-          aDate = a.object.due_at?.timestamp or Number.MAX_VALUE
-          bDate = b.object.due_at?.timestamp or Number.MAX_VALUE
-          if aDate is bDate
-            return 0 if a.object.name is b.object.name
-            return (if a.object.name > b.object.name then 1 else -1)
-          return aDate - bDate
-      throw "unhandled column sort condition"
+          return @compareAssignmentPositions(a, b)
+
+    wrapColumnSortFn: (wrappedFn) =>
+      (a, b) =>
+        return -1 if b.type is 'total_grade'
+        return  1 if a.type is 'total_grade'
+        return -1 if b.type is 'assignment_group' and a.type isnt 'assignment_group'
+        return  1 if a.type is 'assignment_group' and b.type isnt 'assignment_group'
+        if a.type is 'assignment_group' and b.type is 'assignment_group'
+          return a.object.position - b.object.position
+        return wrappedFn(a, b)
 
     rowFilter: (student) =>
       !@sectionToShow || (@sectionToShow in student.sections)
@@ -230,7 +299,7 @@ define [
           break
         params =
           student_ids: (student.id for student in students)
-          response_fields: ['id', 'user_id', 'url', 'score', 'grade', 'submission_type', 'submitted_at', 'assignment_id', 'grade_matches_current_submission', 'attachments']
+          response_fields: ['id', 'user_id', 'url', 'score', 'grade', 'submission_type', 'submitted_at', 'assignment_id', 'grade_matches_current_submission', 'attachments', 'late']
         $.ajaxJSON(@options.submissions_url, "GET", params, @gotSubmissionsChunk)
         @chunk_start += @options.chunk_size
 
@@ -303,22 +372,41 @@ define [
       if val.possible and @options.grading_standard and columnDef.type is 'total_grade'
         letterGrade = GradeCalculator.letter_grade(@options.grading_standard, percentage)
 
-      groupTotalCellTemplate({
-        score: val.score
-        possible: val.possible
-        letterGrade
-        percentage
-      })
+      templateOpts =
+        score: round(val.score, DISPLAY_PRECISION)
+        possible: round(val.possible, DISPLAY_PRECISION)
+        letterGrade: letterGrade
+        percentage: percentage
+      if columnDef.type == 'total_grade'
+        templateOpts.warning = @totalGradeWarning
+        templateOpts.lastColumn = true
+        templateOpts.showPointsNotPercent = @showPointTotals
+
+      groupTotalCellTemplate templateOpts
 
     calculateStudentGrade: (student) =>
       if student.loaded
         finalOrCurrent = if @include_ungraded_assignments then 'final' else 'current'
         submissionsAsArray = (value for key, value of student when key.match /^assignment_(?!group)/)
-        result = INST.GradeCalculator.calculate(submissionsAsArray, @assignmentGroups, @options.group_weighting_scheme)
+        result = GradeCalculator.calculate(submissionsAsArray, @assignmentGroups, @options.group_weighting_scheme)
         for group in result.group_sums
           student["assignment_group_#{group.group.id}"] = group[finalOrCurrent]
+          for submissionData in group[finalOrCurrent].submissions
+            submissionData.submission.drop = submissionData.drop
         student["total_grade"] = result[finalOrCurrent]
 
+        @addDroppedClass(student)
+
+    addDroppedClass: (student) ->
+      droppedAssignments = (name for name, assignment of student when name.match(/assignment_\d+/) and assignment.drop?)
+      drops = {}
+      drops[student.row] = {}
+      for a in droppedAssignments
+        drops[student.row][a] = 'dropped'
+
+      styleKey = "dropsForRow#{student.row}"
+      @gradeGrid.removeCellCssStyles(styleKey)
+      @gradeGrid.addCellCssStyles(styleKey, drops)
 
     highlightColumn: (columnIndexOrEvent) =>
       if isNaN(columnIndexOrEvent)
@@ -344,7 +432,7 @@ define [
         $notAssignments.data('sortable-item', null)
       )()
       (initHeaderDropMenus = =>
-        $headers.find('.gradebook-header-drop').click (event) =>
+        $headers.find('.assignment_header_drop').click (event) =>
           $link = $(event.target)
           unless $link.data('gradebookHeaderMenu')
             $link.data('gradebookHeaderMenu', new GradebookHeaderMenu(@assignments[$link.data('assignmentId')], $link, this))
@@ -437,7 +525,14 @@ define [
     # conjunction with a click listener on <body />. When we 'blur' the grid
     # by clicking outside of it, save the current field.
     onGridBlur: (e) =>
-      return if e.target.className.match(/cell|slick/) or !@gradeGrid.getActiveCell?
+      if e.target.className.match(/cell|slick/) or !@gradeGrid.getActiveCell
+        return
+
+      if e.target.className is 'grade' and @gradeGrid.getCellEditor() instanceof SubmissionCell.out_of 
+        # We can assume that a user clicked the up or down arrows on the
+        # number input, we want to allow them to keep doing that.
+        return
+      
       @gradeGrid.getEditorLock().commitCurrentEdit()
 
     onGridInit: () ->
@@ -475,6 +570,7 @@ define [
             @minimizeColumn($columnHeader) unless columnDef.minimized
           else if columnDef.minimized
             @unminimizeColumn($columnHeader)
+
       $(document).trigger('gridready')
 
     initHeader: =>
@@ -491,8 +587,7 @@ define [
         (updateSectionBeingShownText = =>
           $('#section_being_shown').html(if @sectionToShow then @sections[@sectionToShow].name else allSectionsText)
         )()
-        $('#section_to_show').after($sectionToShowMenu).show().kyleMenu
-          buttonOpts: {icons: {primary: "ui-icon-sections", secondary: "ui-icon-droparrow"}}
+        $('#section_to_show').after($sectionToShowMenu).show().kyleMenu()
         $sectionToShowMenu.bind 'menuselect', (event, ui) =>
           @sectionToShow = Number($sectionToShowMenu.find('[aria-checked="true"] input[name="section_to_show_radio"]').val()) || undefined
           userSettings[ if @sectionToShow then 'contextSet' else 'contextRemove']('grading_show_only_section', @sectionToShow)
@@ -518,15 +613,11 @@ define [
 
       @$columnArrangementTogglers = $('#gradebook-toolbar [data-arrange-columns-by]').bind 'click', (event) =>
         event.preventDefault()
-        thingToArrangeBy = $(event.currentTarget).data('arrangeColumnsBy')
-        @arrangeColumnsBy(thingToArrangeBy)
-      @arrangeColumnsBy('assignment_group')
+        newSortOrder = { sortType: $(event.currentTarget).data('arrangeColumnsBy') }
+        @arrangeColumnsBy(newSortOrder)
+      @arrangeColumnsBy(@getStoredSortOrder())
 
-      $('#gradebook_settings').show().kyleMenu
-        buttonOpts:
-          icons:
-            primary: "ui-icon-cog", secondary: "ui-icon-droparrow"
-          text: false
+      $('#gradebook_settings').show().kyleMenu()
 
       $upload_modal = null
       $settingsMenu.find('.gradebook_upload_link').click (event) =>
@@ -535,7 +626,7 @@ define [
           locals =
             download_gradebook_csv_url: "#{@options.context_url}/gradebook.csv"
             action: "#{@options.context_url}/gradebook_uploads"
-            authenticityToken: $("#ajax_authenticity_token").text()
+            authenticityToken: ENV.AUTHENTICITY_TOKEN
           $upload_modal = $(gradebook_uploads_form(locals))
             .dialog
               bgiframe: true
@@ -544,9 +635,6 @@ define [
               width: 720
               resizable: false
             .fixDialogButtons()
-            .delegate '#gradebook-upload-help-trigger', 'click', ->
-              $(this).hide()
-              $('#gradebook-upload-help').show()
         $upload_modal.dialog('open')
 
       $settingsMenu.find('.student_names_toggle').click (e) ->
@@ -561,6 +649,27 @@ define [
       @userFilter = new InputFilterView el: '.gradebook_filter input'
       @userFilter.on 'input', @onUserFilterInput
 
+      @showPointTotals = @setPointTotals userSettings.contextGet('show_point_totals')
+      totalHeader = new TotalColumnHeaderView
+        showingPoints: => @showPointTotals
+        toggleShowingPoints: @togglePointsOrPercentTotals.bind(this)
+        weightedGroups: @weightedGroups.bind(this)
+      totalHeader.render()
+
+    weightedGroups: ->
+      @options.group_weighting_scheme == "percent"
+
+    setPointTotals: (showPoints) ->
+      @showPointTotals = if @weightedGroups()
+        false
+      else
+        showPoints
+
+    togglePointsOrPercentTotals: ->
+      @setPointTotals(not @showPointTotals)
+      userSettings.contextSet('show_point_totals', @showPointTotals)
+      @gradeGrid.invalidate()
+
     onUserFilterInput: (term) =>
       # put rows back on the students for dropped assignments
       _.each @multiGrid.data, (student) ->
@@ -574,7 +683,7 @@ define [
       @userFilterRemovedRows = []
 
       if term != ''
-        propertiesToMatch = ['name', 'login_id', 'short_name', 'sortable_name']
+        propertiesToMatch = ['name', 'login_id', 'short_name', 'sortable_name', 'sis_user_id']
         index = @multiGrid.data.length
         while index--
           student = @multiGrid.data[index]
@@ -615,6 +724,8 @@ define [
         width = Math.max($widthTester.text(text).outerWidth(), minWidth)
         Math.min width, maxWidth
 
+      @setAssignmentWarnings()
+
       # I would like to make this width a little larger, but there's a dependency somewhere else that
       # I can't find and if I change it, the layout gets messed up.
       @parentColumns = [{
@@ -630,6 +741,16 @@ define [
         id: 'secondary_identifier'
         name: I18n.t 'secondary_id', 'Secondary ID'
         field: 'secondary_identifier'
+        width: 100
+        cssClass: "meta-cell secondary_identifier_cell"
+        resizable: false
+        sortable: true
+      },
+      # [CANVAS-188] Add SIS ID column
+      {
+        id: 'sis_id'
+        name: I18n.t 'sis_id', 'SIS ID'
+        field: 'sis_id'
         width: 100
         cssClass: "meta-cell secondary_identifier_cell"
         resizable: false
@@ -692,11 +813,16 @@ define [
           type: 'assignment_group'
         }
 
+      total = I18n.t "total", "Total"
       @aggregateColumns.push
         id: "total_grade"
         field: "total_grade"
         formatter: @groupTotalFormatter
-        name: "Total"
+        name: """
+          #{total}
+          <div id=total_column_header></div>
+        """
+        toolTip: total
         minWidth: columnWidths.total.min
         maxWidth: columnWidths.total.max
         width: testWidth("Total", columnWidths.total.min, columnWidths.total.max)
@@ -739,7 +865,9 @@ define [
       $('body').on('click', @onGridBlur)
       sortRowsBy = (sortFn) =>
         @rows.sort(sortFn)
-        student.row = i for student, i in @rows
+        for student, i in @rows
+          student.row = i
+          @addDroppedClass(student)
         @multiGrid.invalidate()
       @gradeGrid.onSort.subscribe (event, data) =>
         sortRowsBy (a, b) ->
@@ -749,7 +877,8 @@ define [
           bScore = -99999999999 if not bScore and bScore != 0
           if data.sortAsc then bScore - aScore else aScore - bScore
       @multiGrid.grids[0].onSort.subscribe (event, data) =>
-        propertyToSortBy = {display_name: 'sortable_name', secondary_identifier: 'secondary_identifier'}[data.sortCol.field]
+        # [CANVAS-188] Make SIS ID column sortable
+        propertyToSortBy = {display_name: 'sortable_name', secondary_identifier: 'secondary_identifier', sis_id: 'sis_id'}[data.sortCol.field]
         sortRowsBy (a, b) ->
           res = if a[propertyToSortBy] < b[propertyToSortBy] then -1
           else if a[propertyToSortBy] > b[propertyToSortBy] then 1
@@ -759,5 +888,42 @@ define [
       @multiGrid.parent_grid.onKeyDown.subscribe ->
         # TODO: start editing automatically when a number or letter is typed
         false
+
+      @multiGrid.parent_grid.onColumnsReordered.subscribe @storeCustomColumnOrder
+
       @onGridInit()
 
+    # show warnings for bad grading setups
+    setAssignmentWarnings: =>
+      if @weightedGroups()
+        # assignment group has 0 points possible
+        invalidAssignmentGroups = _.filter @assignmentGroups, (ag) ->
+          pointsPossible = _.inject ag.assignments
+          , ((sum, a) -> sum + (a.points_possible || 0))
+          , 0
+          pointsPossible == 0
+
+        for ag in invalidAssignmentGroups
+          for a in ag.assignments
+            a.invalid = true
+
+        if invalidAssignmentGroups.length > 0
+          groupNames = (ag.name for ag in invalidAssignmentGroups)
+          @totalGradeWarning = I18n.t 'invalid_assignment_groups_warning',
+            one: "Score does not include %{groups} because it has
+                  no points possible"
+            other: "Score does not include %{groups} because they have
+                    no points possible"
+          ,
+            groups: $.toSentence(groupNames)
+            count: groupNames.length
+
+      else
+        # no assignments have points possible
+        pointsPossible = _.inject @assignments
+        , ((sum, a) -> sum + (a.points_possible || 0))
+        , 0
+
+        if pointsPossible == 0
+          @totalGradeWarning = I18n.t 'no_assignments_have_points_warning'
+          , "Can't compute score until an assignment has points possible"

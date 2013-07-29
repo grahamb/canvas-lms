@@ -27,6 +27,7 @@ describe "courses/settings.html.erb" do
     @course.save!
     assigns[:context] = @course
     assigns[:user_counts] = {}
+    assigns[:all_roles] = Role.custom_roles_and_counts_for_course(@course, @user)
   end
 
   describe "sis_source_id edit box" do
@@ -98,4 +99,32 @@ describe "courses/settings.html.erb" do
 
   end
 
+  describe "quota box" do
+    context "as account admin" do
+      before do
+        admin = account_admin_user
+        view_context(@course, admin)
+        assigns[:current_user] = admin
+      end
+  
+      it "should show quota input box" do
+        render
+        response.should have_tag "input#course_storage_quota_mb"
+      end
+    end
+  
+    context "as teacher" do
+      before do
+        view_context(@course, @teacher)
+        assigns[:current_user] = @teacher
+        @user = @teacher
+      end
+  
+      it "should not show quota input box" do
+        render
+        response.should_not have_tag "input#course_storage_quota_mb"
+      end
+    end
+  end
+    
 end

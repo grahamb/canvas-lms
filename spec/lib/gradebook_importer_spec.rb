@@ -60,7 +60,7 @@ describe GradebookImporter do
           'Student,ID,Section,Assignment 1,Final Score',
           '"Blend, Bill",6,My Course,-,',
           'Points Possible,,,10,',
-          'Muted assignments do not impact Current and Final score columns,,,Muted,',
+          ', ,,Muted,',
           '"Farner, Todd",4,My Course,-,')
       @gi.assignments.length.should == 1
       @gi.assignments.first.points_possible.should == 10
@@ -96,7 +96,7 @@ describe GradebookImporter do
       student_in_course(:user => @user)
       @u5 = @user
 
-      uploaded_csv = FasterCSV.generate do |csv|
+      uploaded_csv = CSV.generate do |csv|
         csv << ["Student", "ID", "SIS User ID", "SIS Login ID", "Section", "Assignment 1"]
         csv << ["    Points Possible", "", "","", ""]
         csv << [@u1.name , "", "", "", "", 99]
@@ -147,7 +147,7 @@ describe GradebookImporter do
       student_in_course(:user => @user)
       @u1 = @user
 
-      uploaded_csv = FasterCSV.generate do |csv|
+      uploaded_csv = CSV.generate do |csv|
         csv << ["Student", "ID", "SIS User ID", "SIS Login ID", "Section", "Assignment 1"]
         csv << ["    Points Possible", "", "","", ""]
         csv << ["" , "", "0123456", "", "", 99]

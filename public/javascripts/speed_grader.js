@@ -37,7 +37,8 @@ define([
   'jquery.keycodes' /* keycodes */,
   'jquery.loadingImg' /* loadingImg, loadingImage */,
   'jquery.templateData' /* fillTemplateData, getTemplateData */,
-  'media_comments' /* mediaComment, mediaCommentThumbnail */,
+  'media_comments' /* mediaComment */,
+  'compiled/jquery/mediaCommentThumbnail',
   'vendor/jquery.ba-hashchange' /* hashchange */,
   'vendor/jquery.elastic' /* elastic */,
   'vendor/jquery.getScrollbarWidth' /* getScrollbarWidth */,
@@ -1059,7 +1060,6 @@ define([
                           this.currentStudent.submission.submission_history[currentSelectedIndex] &&
                           this.currentStudent.submission.submission_history[currentSelectedIndex].submission
                           || {},
-            dueAt       = jsonData.due_at && $.parseFromISO(jsonData.due_at),
             submittedAt = submission.submitted_at && $.parseFromISO(submission.submitted_at),
             gradedAt    = submission.graded_at && $.parseFromISO(submission.graded_at),
             inlineableAttachments = [],
@@ -1138,7 +1138,7 @@ define([
 
         // if the submission was after the due date, mark it as late
         this.resizeFullHeight();
-        $submission_late_notice.showIf(dueAt && submittedAt && (submittedAt.minute_timestamp > dueAt.minute_timestamp) );
+        $submission_late_notice.showIf(submission['late']);
       } catch(e) {
         INST.log_error({
           'message': "SG_submissions_" + (e.message || e.description || ""),
@@ -1149,8 +1149,6 @@ define([
     },
 
     refreshSubmissionsToView: function(){
-      var dueAt = jsonData.due_at && $.parseFromISO(jsonData.due_at);
-
       var innerHTML = "";
       if (this.currentStudent.submission.submission_history.length > 0) {
         submissionToSelect = this.currentStudent.submission.submission_history[this.currentStudent.submission.submission_history.length - 1].submission;
@@ -1158,7 +1156,7 @@ define([
         $.each(this.currentStudent.submission.submission_history, function(i, s){
           s = s.submission;
           var submittedAt = s.submitted_at && $.parseFromISO(s.submitted_at),
-              late        = dueAt && submittedAt && submittedAt.timestamp > dueAt.timestamp;
+              late        = s['late'];
 
           innerHTML += "<option " + (late ? "class='late'" : "") + " value='" + i + "' " +
                         (s == submissionToSelect ? "selected='selected'" : "") + ">" +
@@ -1245,6 +1243,7 @@ define([
             mimeType: attachment.content_type,
             attachment_id: attachment.id,
             submission_id: this.currentStudent.submission.id,
+            attachment_view_inline_ping_url: attachment.view_inline_ping_url,
             ready: function(){
               EG.resizeFullHeight();
             }
@@ -1382,7 +1381,7 @@ define([
           }).showIf(commentIsDeleteableByMe);
           
           if (comment.media_comment_type && comment.media_comment_id) {
-            $comment.find(".play_comment_link").show();
+            $comment.find(".play_comment_link").data(comment).show();
           }
           $.each((comment.cached_attachments || comment.attachments), function(){
             var attachment = this.attachment || this;
@@ -1560,9 +1559,8 @@ define([
         EG.resizeFullHeight();
       });
       $right_side.delegate(".play_comment_link", 'click', function() {
-        var comment_id = $(this).parents(".comment").getTemplateData({textValues: ['media_comment_id']}).media_comment_id;
-        if(comment_id) {
-          $(this).parents(".comment").find(".media_comment_content").show().mediaComment('show', comment_id, 'audio');
+        if($(this).data('media_comment_id')) {
+          $(this).parents(".comment").find(".media_comment_content").show().mediaComment('show', $(this).data('media_comment_id'), $(this).data('media_comment_type'));
         }
         return false; // so that it doesn't hit the $("a.instructure_inline_media_comment").live('click' event handler
       });

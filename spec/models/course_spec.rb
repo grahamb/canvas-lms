@@ -52,13 +52,35 @@ describe Course do
     @course.enrollment_term.update_attribute(:end_at, Time.now + 1.week)
     @course.should_not be_soft_concluded
   end
-  
+
+  context "#old_gradebook_visible?" do
+    it "should always return false when enrollment count is large enough" do
+        @course.large_roster = false
+        @course.old_gradebook_visible?.should be_true
+        @course.students.stubs(:count).returns(251)
+        @course.old_gradebook_visible?.should be_false
+    end
+  end
+
+  describe "allow_student_discussion_topics" do
+
+    it "should default true" do
+      @course.allow_student_discussion_topics.should == true
+    end
+
+    it "should set and get" do
+      @course.allow_student_discussion_topics = false
+      @course.save!
+      @course.allow_student_discussion_topics.should == false
+    end
+  end
+
   context "validation" do
     it "should create a new instance given valid attributes" do
       course_model
     end
   end
-  
+
   it "should create a unique course." do
     @course = Course.create_unique
     @course.name.should eql("My Course")
@@ -66,7 +88,7 @@ describe Course do
     @course2 = Course.create_unique(@uuid)
     @course.should eql(@course2)
   end
-  
+
   it "should always have a uuid, if it was created" do
     @course.save!
     @course.uuid.should_not be_nil
@@ -315,7 +337,7 @@ describe Course do
     @course.discussion_topics.create!
     @course.quizzes.create!
     @course.assignments.create!
-    @course.wiki.wiki_page.save!
+    @course.wiki.front_page.save!
     @course.self_enrollment = true
     @course.sis_source_id = 'sis_id'
     @course.stuck_sis_fields = [].to_set
@@ -483,6 +505,25 @@ describe Course do
       events.should include assignment
     end
   end
+
+  context "migrate_content_links" do
+    it "should ignore types not in the supported_types arg" do
+      c1 = course_model
+      c2 = course_model
+      orig = <<-HTML
+      We aren't translating <a href="/courses/#{c1.id}/assignments/5">links to assignments</a>
+      HTML
+      html = Course.migrate_content_links(orig, c1, c2, ['files'])
+      html.should == orig
+    end
+  end
+
+  it "should be marshal-able" do
+    c = Course.new(:name => 'c1')
+    Marshal.dump(c)
+    c.save!
+    Marshal.dump(c)
+  end
 end
 
 describe Course, "enroll" do
@@ -548,8 +589,8 @@ describe Course, "enroll" do
   it "should scope correctly when including teachers from course" do
     account = @course.account
     @course.enroll_student(@user)
-    scope = account.associated_courses.active.scoped(:select=>"id, name", :joins=>:teachers, :include=>:teachers, :conditions => "enrollments.workflow_state = 'active'")
-    sql = scope.construct_finder_sql({})
+    scope = account.associated_courses.active.select([:id, :name]).joins(:teachers).includes(:teachers).where(:enrollments => { :workflow_state => 'active' })
+    sql = scope.to_sql
     sql.should match(/enrollments.type = 'TeacherEnrollment'/)
   end
 end
@@ -607,7 +648,7 @@ describe Course, "gradebook_to_csv" do
     
     csv = @course.gradebook_to_csv
     csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     rows.length.should equal(3)
     rows[0][-1].should == "Final Score"
     rows[1][-1].should == "(read only)"
@@ -617,60 +658,41 @@ describe Course, "gradebook_to_csv" do
     rows[2][-2].should == "100"
   end
   
-  it "should order assignments by due date, assignment_group, position, title" do
+  it "should order assignments by position" do
     course_with_student(:active_all => true)
 
     @assignment_group_1, @assignment_group_2 = [@course.assignment_groups.create!(:name => "Some Assignment Group 1", :group_weight => 100), @course.assignment_groups.create!(:name => "Some Assignment Group 2", :group_weight => 100)].sort_by{|a| a.id}
 
     now = Time.now
 
-    @assignment = @course.assignments.create!(:title => "Some Assignment 01", :points_possible => 10, :due_at => now + 1.days, :position => 3, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 02", :points_possible => 10, :due_at => now + 1.days, :position => 1, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 03", :points_possible => 10, :due_at => now + 1.days, :position => 2, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 05", :points_possible => 10, :due_at => now + 4.days, :position => 4, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 04", :points_possible => 10, :due_at => now + 5.days, :position => 5, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 06", :points_possible => 10, :due_at => now + 7.days, :position => 6, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 07", :points_possible => 10, :due_at => now + 6.days, :position => 7, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 08", :points_possible => 10, :due_at => now + 8.days, :position => 1, :assignment_group => @assignment_group_2)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 09", :points_possible => 10, :due_at => now + 8.days, :position => 9, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 10", :points_possible => 10, :due_at => now + 8.days, :position => 10, :assignment_group => @assignment_group_2)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 11", :points_possible => 10, :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 13", :points_possible => 10, :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 12", :points_possible => 10, :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 14", :points_possible => 10, :due_at => nil, :position => 14, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 01", :due_at => now + 1.days, :position => 3, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 02", :due_at => now + 1.days, :position => 1, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 03", :due_at => now + 1.days, :position => 2, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 05", :due_at => now + 4.days, :position => 4, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 04", :due_at => now + 5.days, :position => 5, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 06", :due_at => now + 7.days, :position => 6, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 07", :due_at => now + 6.days, :position => 7, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 08", :due_at => now + 8.days, :position => 1, :assignment_group => @assignment_group_2)
+    @course.assignments.create!(:title => "Assignment 09", :due_at => now + 8.days, :position => 9, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 10", :due_at => now + 8.days, :position => 10, :assignment_group => @assignment_group_2)
+    @course.assignments.create!(:title => "Assignment 12", :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 14", :due_at => nil, :position => 14, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 11", :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 13", :due_at => now + 11.days, :position => 11, :assignment_group => @assignment_group_1)
+    @course.assignments.create!(:title => "Assignment 99", :position => 1, :assignment_group => @assignment_group_1, :submission_types => 'not_graded')
     @course.recompute_student_scores
     @user.reload
     @course.reload
 
     csv = @course.gradebook_to_csv
     csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     rows.length.should equal(3)
     assignments = []
     rows[0].each do |column|
-      assignments << column.sub(/ \([0-9]+\)/, '') if column =~ /Some Assignment/
+      assignments << column.sub(/ \([0-9]+\)/, '') if column =~ /Assignment/
     end
-    assignments.should == ["Some Assignment 14", "Some Assignment 02", "Some Assignment 03", "Some Assignment 01", "Some Assignment 05", "Some Assignment 04", "Some Assignment 07", "Some Assignment 06", "Some Assignment 09", "Some Assignment 08", "Some Assignment 10", "Some Assignment 11", "Some Assignment 12", "Some Assignment 13"]
-  end
-
-  it "should work for just one assignment" do
-    course_with_student(:active_all => true)
-    now = Time.now
-    @assignment = @course.assignments.create!(:title => "Some Assignment 1", :points_possible => 10, :assignment_group => @group, :due_at => now + 1.days, :position => 3)
-    @assignment = @course.assignments.create!(:title => "Some Assignment 2", :points_possible => 10, :assignment_group => @group, :due_at => now + 1.days, :position => 1)
-    @course.recompute_student_scores
-    @user.reload
-    @course.reload
-
-    csv = @course.gradebook_to_csv :assignment_id => @assignment
-    csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
-    rows.length.should equal(3)
-    assignments = []
-    rows[0].each do |column|
-      assignments << column.sub(/ \([0-9]+\)/, '') if column =~ /Some Assignment/
-    end
-    assignments.should == ["Some Assignment 2"]
+    assignments.should == ["Assignment 02", "Assignment 03", "Assignment 01", "Assignment 05",  "Assignment 04", "Assignment 06", "Assignment 07", "Assignment 09", "Assignment 11", "Assignment 12", "Assignment 13", "Assignment 14", "Assignment 08", "Assignment 10"]
   end
 
   it "should generate csv with final grade if enabled" do
@@ -688,7 +710,7 @@ describe Course, "gradebook_to_csv" do
     
     csv = @course.gradebook_to_csv
     csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     rows.length.should equal(3)
     rows[0][-1].should == "Final Grade"
     rows[1][-1].should == "(read only)"
@@ -722,7 +744,7 @@ describe Course, "gradebook_to_csv" do
 
     csv = @course.gradebook_to_csv(:include_sis_id => true)
     csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     rows.length.should == 5
     rows[0][1].should == 'ID'
     rows[0][2].should == 'SIS User ID'
@@ -743,6 +765,31 @@ describe Course, "gradebook_to_csv" do
     rows[4][3].should be_nil
   end
 
+  context "accumulated points" do
+    before do
+      student_in_course(:active_all => true)
+      a = @course.assignments.create! :title => "Blah", :points_possible => 10
+      a.grade_student @student, :grade => 8
+    end
+
+    it "includes points for unweighted courses" do
+      csv = CSV.parse(@course.gradebook_to_csv)
+      csv[0][-4].should == "Current Points"
+      csv[0][-3].should == "Final Points"
+      csv[1][-4].should == "(read only)"
+      csv[1][-3].should == "(read only)"
+      csv[2][-4].should == "8"
+      csv[2][-3].should == "8"
+    end
+
+    it "doesn't include points for weighted courses" do
+      @course.update_attribute(:group_weighting_scheme, 'percent')
+      csv = CSV.parse(@course.gradebook_to_csv)
+      csv[0][-4].should_not == "Current Points"
+      csv[0][-3].should_not == "Final Points"
+    end
+  end
+
   it "should only include students once" do
     # students might have multiple enrollments in a course
     course(:active_all => true)
@@ -754,7 +801,7 @@ describe Course, "gradebook_to_csv" do
     StudentEnrollment.create!(:user => @user1, :course => @course, :course_section => @s2)
     @course.reload
     csv = @course.gradebook_to_csv(:include_sis_id => true)
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     rows.length.should == 4
   end
 
@@ -781,13 +828,13 @@ describe Course, "gradebook_to_csv" do
 
       csv = @course.gradebook_to_csv(:include_sis_id => true)
       csv.should_not be_nil
-      rows = FasterCSV.parse(csv)
+      rows = CSV.parse(csv)
       rows.length.should == 6
       rows[0][1].should == 'ID'
       rows[0][2].should == 'SIS User ID'
       rows[0][3].should == 'SIS Login ID'
       rows[0][4].should == 'Section'
-      rows[1][0].should == 'Muted assignments do not impact Current and Final score columns'
+      rows[1][0].should == ''
       rows[1][5].should == 'Muted'
       rows[1][6].should == ''
       rows[2][2].should == ''
@@ -816,7 +863,7 @@ describe Course, "gradebook_to_csv" do
 
     csv = @course.gradebook_to_csv(:user => @teacher)
     csv.should_not be_nil
-    rows = FasterCSV.parse(csv)
+    rows = CSV.parse(csv)
     # two header rows, and one student row
     rows.length.should == 3
     rows[2][1].should == @user2.id.to_s
@@ -2217,14 +2264,14 @@ describe Course, 'grade_publishing' do
 end
 
 describe Course, 'tabs_available' do
-  def new_exernal_tool(context)
+  def new_external_tool(context)
     context.context_external_tools.new(:name => "bob", :consumer_key => "bob", :shared_secret => "bob", :domain => "example.com")
   end
   
   it "should not include external tools if not configured for course navigation" do
     course_model
-    tool = new_exernal_tool @course
-    tool.settings[:user_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @course
+    tool.user_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == false
     @teacher = user_model
@@ -2235,8 +2282,8 @@ describe Course, 'tabs_available' do
   
   it "should include external tools if configured on the course" do
     course_model
-    tool = new_exernal_tool @course
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2253,8 +2300,8 @@ describe Course, 'tabs_available' do
     course_model
     @account = @course.root_account.sub_accounts.create!(:name => "sub-account")
     @course.move_to_account(@account.root_account, @account)
-    tool = new_exernal_tool @account
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @account
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2271,8 +2318,8 @@ describe Course, 'tabs_available' do
     course_model
     @account = @course.root_account.sub_accounts.create!(:name => "sub-account")
     @course.move_to_account(@account.root_account, @account)
-    tool = new_exernal_tool @account.root_account
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @account.root_account
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2290,8 +2337,8 @@ describe Course, 'tabs_available' do
     @course.offer
     @course.is_public = true
     @course.save!
-    tool = new_exernal_tool @course
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL", :visibility => 'admins'}
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL", :visibility => 'admins'}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2316,8 +2363,8 @@ describe Course, 'tabs_available' do
     @course.offer
     @course.is_public = true
     @course.save!
-    tool = new_exernal_tool @course
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL", :visibility => 'members'}
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL", :visibility => 'members'}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2339,8 +2386,8 @@ describe Course, 'tabs_available' do
   
   it "should allow reordering external tool position in course navigation" do
     course_model
-    tool = new_exernal_tool @course
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2353,8 +2400,8 @@ describe Course, 'tabs_available' do
   
   it "should not show external tools that are hidden in course navigation" do
     course_model
-    tool = new_exernal_tool @course
-    tool.settings[:course_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :text => "Example URL"}
     tool.save!
     tool.has_course_navigation.should == true
     @teacher = user_model
@@ -2371,7 +2418,40 @@ describe Course, 'tabs_available' do
     tabs = @course.tabs_available(@teacher, :for_reordering => true)
     tabs.map{|t| t[:id] }.should be_include(tool.asset_string)
   end
-  
+
+  it "uses extension default values" do
+    course_model
+    tool = new_external_tool @course
+    tool.course_navigation = {}
+    tool.settings[:url] = "http://www.example.com"
+    tool.settings[:visibility] = "members"
+    tool.settings[:default] = "disabled"
+    tool.save!
+
+    tool.course_navigation(:url).should == "http://www.example.com"
+    tool.has_course_navigation.should == true
+
+    settings = @course.external_tool_tabs({}).first
+    settings.should include(:visibility=>"members")
+    settings.should include(:hidden=>true)
+  end
+
+  it "prefers extension settings over default values" do
+    course_model
+    tool = new_external_tool @course
+    tool.course_navigation = {:url => "http://www.example.com", :visibility => "admins", :default => "active" }
+    tool.settings[:visibility] = "members"
+    tool.settings[:default] = "disabled"
+    tool.save!
+
+    tool.course_navigation(:url).should == "http://www.example.com"
+    tool.has_course_navigation.should == true
+
+    settings = @course.external_tool_tabs({}).first
+    settings.should include(:visibility=>"admins")
+    settings.should include(:hidden=>false)
+  end
+
 end
 
 describe Course, 'scoping' do
@@ -2565,7 +2645,7 @@ describe Course, "inherited_assessment_question_banks" do
     bank = @course.assessment_question_banks.create
 
     banks = @course.inherited_assessment_question_banks(true)
-    banks.scoped(:order => :id).should eql [root_bank, account_bank, bank]
+    banks.order(:id).should eql [root_bank, account_bank, bank]
     banks.find_by_id(bank.id).should eql bank
     banks.find_by_id(account_bank.id).should eql account_bank
     banks.find_by_id(root_bank.id).should eql root_bank
@@ -2591,12 +2671,12 @@ describe Course, "section_visibility" do
     @course.enroll_user(@student2, "StudentEnrollment", :section => @other_section, :enrollment_state => 'active')
 
     @observer = User.create
-    @course.enroll_user(@observer, "ObserverEnrollment")
+    @course.enroll_user(@observer, "ObserverEnrollment").update_attribute(:associated_user_id, @student1.id)
   end
 
   it "should return a scope from sections_visible_to" do
     # can't use "should respond_to", because that delegates to the instantiated Array
-    lambda{ @course.sections_visible_to(@teacher).scoped({}) }.should_not raise_exception
+    lambda{ @course.sections_visible_to(@teacher).scoped }.should_not raise_exception
   end
 
   context "full" do
@@ -2634,32 +2714,29 @@ describe Course, "section_visibility" do
   end
 
   context "restricted" do
-    it "should return no students" do
-      @course.students_visible_to(@observer).should eql []
+    it "should return no students except self and the observed" do
+      @course.students_visible_to(@observer).should eql [@student1]
+      RoleOverride.create!(:context => @course.account, :permission => 'read_roster',
+                           :enrollment_type => "StudentEnrollment", :enabled => false)
+      @course.students_visible_to(@student1).should eql [@student1]
     end
 
     it "should return no sections" do
       @course.sections_visible_to(@observer).should eql []
+      RoleOverride.create!(:context => @course.account, :permission => 'read_roster',
+                           :enrollment_type => "StudentEnrollment", :enabled => false)
+      @course.sections_visible_to(@student1).should eql []
     end
   end
 
-  context "migrate_content_links" do
-    it "should ignore types not in the supported_types arg" do
-      c1 = course_model
-      c2 = course_model
-      orig = <<-HTML
-      We aren't translating <a href="/courses/#{c1.id}/assignments/5">links to assignments</a>
-      HTML
-      html = Course.migrate_content_links(orig, c1, c2, ['files'])
-      html.should == orig
+  context "require_message_permission" do
+    it "should check the message permission" do
+      @course.enrollment_visibility_level_for(@teacher, @course.section_visibilities_for(@teacher), true).should eql :full
+      @course.enrollment_visibility_level_for(@observer, @course.section_visibilities_for(@observer), true).should eql :restricted
+      RoleOverride.create!(:context => @course.account, :permission => 'send_messages',
+                           :enrollment_type => "StudentEnrollment", :enabled => false)
+      @course.enrollment_visibility_level_for(@student1, @course.section_visibilities_for(@student1), true).should eql :restricted
     end
-  end
-
-  it "should be marshal-able" do
-    c = Course.new(:name => 'c1')
-    Marshal.dump(c)
-    c.save!
-    Marshal.dump(c)
   end
 end
 
@@ -2741,10 +2818,12 @@ describe Course, "enrollments" do
     @course.save!
 
     @course.student_enrollments.map(&:root_account_id).should eql [a1.id]
+    @course.course_sections.reload.map(&:root_account_id).should eql [a1.id]
 
     @course.root_account = a2
     @course.save!
     @course.student_enrollments(true).map(&:root_account_id).should eql [a2.id]
+    @course.course_sections.reload.map(&:root_account_id).should eql [a2.id]
   end
 end
 
@@ -2850,6 +2929,15 @@ describe Course, "student_view_student" do
     course_with_teacher(:active_all => true)
   end
 
+  it "should create a default section when enrolling for student view student" do
+    student_view_course = Course.create!
+    student_view_course.course_sections.should be_empty
+
+    student_view_student = student_view_course.student_view_student
+
+    student_view_course.enrollments.map(&:user_id).should be_include(student_view_student.id)
+  end
+
   it "should create and return the student view student for a course" do
     expect { @course.student_view_student }.to change(User, :count).by(1)
   end
@@ -2947,7 +3035,7 @@ describe Course do
 
     it "should generate a code on demand for existing self enrollment courses" do
       c1 = course()
-      Course.update_all({:self_enrollment => true}, {:id => @course.id})
+      Course.where(:id => @course).update_all(:self_enrollment => true)
       c1.reload
       c1.read_attribute(:self_enrollment_code).should be_nil
       c1.self_enrollment_code.should_not be_nil
@@ -2996,17 +3084,78 @@ describe Course do
 
     it "should return a scope" do
       # can't use "should respond_to", because that delegates to the instantiated Array
-      lambda{ @course.groups_visible_to(@user).scoped({}) }.should_not raise_exception
+      lambda{ @course.groups_visible_to(@user).scoped }.should_not raise_exception
+    end
+  end
+
+  describe 'permission policies' do
+    before do
+      @course = course_model
+      @course.write_attribute(:workflow_state, 'available')
+      @course.write_attribute(:is_public, true)
+    end
+
+    it 'can be read by a nil user if public and available' do
+      @course.check_policy(nil).should == [:read, :read_outcomes, :read_syllabus]
+    end
+
+    it 'cannot be read by a nil user if public but not available' do
+      @course.write_attribute(:workflow_state, 'created')
+      @course.check_policy(nil).should == []
+    end
+
+    describe 'when course is not public' do
+      before do
+        @course.write_attribute(:is_public, false)
+      end
+
+      let(:user) { user_model }
+
+
+      it 'cannot be read by a nil user' do
+        @course.check_policy(nil).should == []
+      end
+
+      it 'cannot be read by an unaffiliated user' do
+        @course.check_policy(user).should == []
+      end
+
+      it 'can be read by a prior user' do
+        user.enrollments.create!(:workflow_state => 'completed', :course => @course)
+        @course.check_policy(user).should == [:read, :read_outcomes]
+      end
+
+      it 'can have its forum read by an observer' do
+        enrollment = user.observer_enrollments.create!(:workflow_state => 'completed', :course => @course)
+        enrollment.update_attribute(:associated_user_id, user.id)
+        @course.check_policy(user).should include :read_forum
+      end
+
+      describe 'an instructor policy' do
+
+        let(:instructor) do
+          user.teacher_enrollments.create!(:workflow_state => 'completed', :course => @course)
+          user
+        end
+
+        subject{ @course.check_policy(instructor) }
+
+        it{ should include :read_prior_roster }
+        it{ should include :view_all_grades }
+        it{ should include :delete }
+      end
+
     end
   end
 
   context "sharding" do
-    it_should_behave_like "sharding"
+    specs_require_sharding
 
     it "should properly return site admin permissions from another shard" do
       enable_cache do
         @shard1.activate do
-          course_with_student(:active_all => 1)
+          acct = Account.create!
+          course_with_student(:active_all => 1, :account => acct)
         end
         @site_admin = user
         site_admin = Account.site_admin
@@ -3032,6 +3181,27 @@ describe Course do
         @course.grants_right?(@site_admin, nil, :manage_content).should be_true
       end
     end
+
+    it "should grant enrollment-based permissions regardless of shard" do
+      @shard1.activate do
+        account = Account.create!
+        course(:active_course => true, :account => account)
+      end
+
+      @shard2.activate do
+        user(:active_user => true)
+      end
+
+      student_in_course(:user => @user, :active_all => true)
+
+      @shard1.activate do
+        @course.grants_right?(@user, :send_messages).should be_true
+      end
+
+      @shard2.activate do
+        @course.grants_right?(@user, :send_messages).should be_true
+      end
+    end
   end
 
   context "named scopes" do
@@ -3052,7 +3222,7 @@ describe Course do
         end
 
         it "should play nice with other scopes" do
-          Course.with_enrollments.scoped(:conditions => {:name => 'A'}).should == [@course1a]
+          Course.with_enrollments.where(:name => 'A').should == [@course1a]
         end
 
         it "should be disjoint with #without_enrollments" do
@@ -3066,7 +3236,7 @@ describe Course do
         end
 
         it "should play nice with other scopes" do
-          Course.without_enrollments.scoped(:conditions => {:name => 'A'}).should == [@course2a]
+          Course.without_enrollments.where(:name => 'A').should == [@course2a]
         end
       end
     end
@@ -3093,7 +3263,7 @@ describe Course do
         end
 
         it "should play nice with other scopes" do
-          Course.completed.scoped(:conditions => {:conclude_at => nil}).should == [@c4]
+          Course.completed.where(:conclude_at => nil).should == [@c4]
         end
 
         it "should be disjoint with #not_completed" do
@@ -3107,7 +3277,7 @@ describe Course do
         end
 
         it "should play nice with other scopes" do
-          Course.not_completed.scoped(:conditions => {:conclude_at => nil}).should == [@c1]
+          Course.not_completed.where(:conclude_at => nil).should == [@c1]
         end
       end
     end
@@ -3191,24 +3361,178 @@ describe Course do
       end
     end
   end
+
+  describe '#includes_student' do
+    let(:course) { course_model }
+
+    it 'returns true when the provided user is a student' do
+      student = user_model
+      student.student_enrollments.create!(:course => course)
+      course.includes_student?(student).should be_true
+    end
+
+    it 'returns false when the provided user is not a student' do
+      course.includes_student?(User.create!).should be_false
+    end
+
+    it 'returns false when the user is not yet even in the database' do
+      course.includes_student?(User.new).should be_false
+    end
+
+    it 'returns false when the provided user is nil' do
+      course.includes_student?(nil).should be_false
+    end
+  end
 end
 
 describe Course do
   context "re-enrollments" do
     it "should update concluded enrollment on re-enrollment" do
       @course = course(:active_all => true)
-      
-      @user1 = user_model; @user1.sortable_name = 'jonny'; @user1.save      
+
+      @user1 = user_model
+      @user1.sortable_name = 'jonny'
+      @user1.save
       @course.enroll_user(@user1)
-      
+
       enrollment_count = @course.enrollments.count
-      
+
       @course.complete
       @course.unconclude
-      
+
       @course.enroll_user(@user1)
-      
+
       @course.enrollments.count.should == enrollment_count
+    end
+
+    describe "already_enrolled" do
+      before do
+        course
+        user
+      end
+
+      it "should not be set for a new enrollment" do
+        @course.enroll_user(@user).already_enrolled.should_not be_true
+      end
+
+      it "should be set for an updated enrollment" do
+        @course.enroll_user(@user)
+        @course.enroll_user(@user).already_enrolled.should be_true
+      end
+    end
+
+    context "custom roles" do
+      before do
+        @account = Account.default
+        course
+        user
+        custom_student_role('LazyStudent')
+        custom_student_role('HonorStudent')
+      end
+
+      it "should re-use an enrollment with the same role" do
+        enrollment1 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'HonorStudent')
+        enrollment2 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'HonorStudent')
+        @user.enrollments.count.should eql 1
+        enrollment1.should eql enrollment2
+      end
+
+      it "should not re-use an enrollment with a different role" do
+        enrollment1 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'LazyStudent')
+        enrollment2 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'HonorStudent')
+        @user.enrollments.count.should eql 2
+        enrollment1.should_not eql enrollment2
+      end
+
+      it "should not re-use an enrollment with no role when enrolling with a role" do
+        enrollment1 = @course.enroll_user(@user, 'StudentEnrollment')
+        enrollment2 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'HonorStudent')
+        @user.enrollments.count.should eql 2
+        enrollment1.should_not eql enrollment2
+      end
+
+      it "should not re-use an enrollment with a role when enrolling with no role" do
+        enrollment1 = @course.enroll_user(@user, 'StudentEnrollment', :role_name => 'LazyStudent')
+        enrollment2 = @course.enroll_user(@user, 'StudentEnrollment')
+        @user.enrollments.count.should eql 2
+        enrollment1.should_not eql enrollment2
+      end
+    end
+  end
+
+  describe "short_name_slug" do
+    before :each do
+      @course = course(:active_all => true)
+    end
+
+    it "should hard truncate at 30 characters" do
+      @course.short_name = "a" * 31
+      @course.short_name.length.should == 31
+      @course.short_name_slug.length.should == 30
+      @course.short_name.should =~ /^#{@course.short_name_slug}/
+    end
+
+    it "should not change the short_name" do
+      short_name = "a" * 31
+      @course.short_name = short_name
+      @course.short_name_slug.should_not == @course.short_name
+      @course.short_name.should == short_name
+    end
+
+    it "should leave short short_names alone" do
+      @course.short_name = 'short short_name'
+      @course.short_name_slug.should == @course.short_name
+    end
+  end
+
+  describe "re_send_invitations!" do
+    it "should send invitations" do
+      course(:active_all => true)
+      user1 = user_with_pseudonym(:active_all => true)
+      user2 = user_with_pseudonym(:active_all => true)
+      @course.enroll_student(user1)
+      @course.enroll_student(user2).accept!
+
+      dm_count = DelayedMessage.count
+      DelayedMessage.where(:communication_channel_id => user1.communication_channels.first).count.should == 0
+      Notification.create!(:name => 'Enrollment Invitation')
+      @course.re_send_invitations!
+
+      DelayedMessage.count.should == dm_count + 1
+      DelayedMessage.where(:communication_channel_id => user1.communication_channels.first).count.should == 1
+    end
+  end
+
+  it "creates a scope the returns deleted courses" do 
+    @course1 = Course.create!
+    @course1.workflow_state = 'deleted'
+    @course1.save!
+    @course2 = Course.create!
+
+    Course.deleted.count.should == 1
+  end
+
+  describe "visibility_limited_to_course_sections?" do
+    before do
+      course
+      @limited = { :limit_privileges_to_course_section => true }
+      @full = { :limit_privileges_to_course_section => false }
+    end
+
+    it "should be true if all visibilities are limited" do
+      @course.visibility_limited_to_course_sections?(nil, [@limited, @limited]).should be_true
+    end
+
+    it "should be false if only some visibilities are limited" do
+      @course.visibility_limited_to_course_sections?(nil, [@limited, @full]).should be_false
+    end
+
+    it "should be false if no visibilities are limited" do
+      @course.visibility_limited_to_course_sections?(nil, [@full, @full]).should be_false
+    end
+
+    it "should be true if no visibilities are given" do
+      @course.visibility_limited_to_course_sections?(nil, []).should be_true
     end
   end
 end

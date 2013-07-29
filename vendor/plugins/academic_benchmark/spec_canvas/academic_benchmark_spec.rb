@@ -1,4 +1,6 @@
-require File.dirname(__FILE__) + '/spec_helper'
+# encoding: utf-8
+
+require File.expand_path(File.dirname(__FILE__) + '/spec_helper')
 
 describe AcademicBenchmark::Converter do
 
@@ -74,8 +76,8 @@ describe AcademicBenchmark::Converter do
     j.high_grade.should == "1"
     k = j.child_outcome_groups.last
     k.migration_id.should == "kkkkkkkkkkk"
-    k.title.should == "1.DD - Something"
-    k.description.should == "Something"
+    k.title.should == "1.DD - zééééééééééééééééééééééééééééééééééééééééééééééééé"
+    k.description.should == "zéééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
     k.low_grade.should == "1"
     k.high_grade.should == "1"
     l = k.child_outcome_groups.first
@@ -89,14 +91,14 @@ describe AcademicBenchmark::Converter do
     m = LearningOutcome.global.find_by_migration_id("mmmmmmmmmmm")
     m.short_description.should == "1.DD.1"
     m.description.should == "And something else"
+    m.title.should == "1.DD.1"
   end
 
   it "should successfully import the standards" do
     @cm.export_content
     run_jobs
     @cm.reload
-    @cm.migration_settings[:warnings].should be_nil
-    @cm.migration_settings[:last_error].should be_nil
+    @cm.migration_issues.count.should == 0
     @cm.workflow_state.should == 'imported'
 
     verify_full_import()
@@ -109,8 +111,9 @@ describe AcademicBenchmark::Converter do
     run_jobs
     @cm.reload
 
+    @cm.migration_issues.count.should == 1
+    @cm.migration_issues.first.description.should == "User isn't allowed to edit global outcomes"
     @cm.workflow_state.should == 'failed'
-    @cm.migration_settings[:last_error].should =~ /ErrorReport:\d+/
   end
 
   it "should fail if no file or authority set" do
@@ -122,8 +125,8 @@ describe AcademicBenchmark::Converter do
     run_jobs
     @cm.reload
 
-    @cm.migration_settings[:warnings].should == [["No outcome file or authority given", ""]]
-    @cm.migration_settings[:last_error].should_not be_nil
+    @cm.migration_issues.count.should == 1
+    @cm.migration_issues.first.description.should == "No outcome file or authority given"
     @cm.workflow_state.should == 'failed'
   end
 
@@ -141,8 +144,7 @@ describe AcademicBenchmark::Converter do
       run_jobs
       @cm.reload
 
-      @cm.migration_settings[:warnings].should be_nil
-      @cm.migration_settings[:last_error].should be_nil
+      @cm.migration_issues.count.should == 0
       @cm.workflow_state.should == 'imported'
 
       @root_group = LearningOutcomeGroup.global_root_outcome_group
@@ -157,8 +159,8 @@ describe AcademicBenchmark::Converter do
       run_jobs
       @cm.reload
 
-      @cm.migration_settings[:warnings].should == [["An API key is required to use Academic Benchmarks", ""]]
-      @cm.migration_settings[:last_error].should_not be_nil
+      @cm.migration_issues.count.should == 1
+      @cm.migration_issues.first.description.should == "An API key is required to use Academic Benchmarks"
       @cm.workflow_state.should == 'failed'
     end
 
@@ -203,7 +205,7 @@ describe AcademicBenchmark::Converter do
       @cm.reload
 
       er = ErrorReport.last
-      @cm.migration_settings[:warnings].should == [["Couldn't update standards for authority CC.", "ErrorReport:#{er.id}"]]
+      @cm.old_warnings_format.should == [["Couldn't update standards for authority CC.", "ErrorReport:#{er.id}"]]
       @cm.migration_settings[:last_error].should be_nil
       @cm.workflow_state.should == 'imported'
     end

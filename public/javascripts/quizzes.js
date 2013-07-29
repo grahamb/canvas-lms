@@ -17,11 +17,18 @@
  */
 define([
   'i18n!quizzes',
+  'underscore',
   'jquery' /* $ */,
   'calcCmd',
   'str/htmlEscape',
   'str/pluralize',
   'wikiSidebar',
+  'compiled/views/assignments/DueDateList',
+  'compiled/views/assignments/DueDateOverride',
+  'compiled/models/Quiz',
+  'compiled/models/DueDateList',
+  'compiled/collections/SectionCollection',
+  'compiled/views/calendar/MissingDateDialogView',
   'compiled/editor/MultipleChoiceToggle',
   'compiled/str/TextHelper',
   'jquery.ajaxJSON' /* ajaxJSON */,
@@ -41,7 +48,64 @@ define([
   'vendor/jquery.scrollTo' /* /\.scrollTo/ */,
   'jqueryui/sortable' /* /\.sortable/ */,
   'jqueryui/tabs' /* /\.tabs/ */
-], function(I18n, $, calcCmd, htmlEscape, pluralize, wikiSidebar, MultipleChoiceToggle, TextHelper) {
+], function(I18n,_,$,calcCmd, htmlEscape, pluralize, wikiSidebar,
+            DueDateListView, DueDateOverrideView, Quiz, DueDateList,SectionList,
+            MissingDateDialog,MultipleChoiceToggle,TextHelper){
+
+  var dueDateList, overrideView, quizModel, sectionList;
+
+  function adjustOverridesForFormParams(overrides){
+    var idx = 0;
+    var overridesLength = overrides.length;
+    var _override = null;
+    var dates = [ 'due_at', 'lock_at', 'unlock_at' ];
+    // make sure we don't send the literal string "null" to the server.
+    for (idx;idx< overridesLength;idx++){
+      _override = overrides[idx]
+      for (var date in dates) {
+        var _date = dates[date];
+        if (!dates.hasOwnProperty(date)) continue;
+        if (_override[_date]) {
+          _override[_date] = _override[_date].toUTCString();
+        } else {
+          _override[_date] = "";
+        }
+      }
+      // TODO: let the quiz API handle this.
+      // The AssignmentOverride model can take care of these values.
+      // See the automatically defined methods via self.override
+      // in app/models/assignment_override.rb
+      delete _override.unlock_at_overridden;
+      delete _override.lock_at_overridden;
+      delete _override.all_day_date;
+      delete _override.due_at_overridden;
+      delete _override.all_day;
+    }
+  }
+
+  if (ENV.QUIZ && ENV.ASSIGNMENT_OVERRIDES != null) {
+
+    ENV.QUIZ.assignment_overrides = ENV.ASSIGNMENT_OVERRIDES;
+    quizModel = new Quiz(ENV.QUIZ);
+
+    sectionList = new SectionList(ENV.SECTION_LIST);
+
+    dueDateList = new DueDateList(quizModel.get('assignment_overrides'),
+                                  sectionList, quizModel);
+
+    overrideView = new DueDateOverrideView({
+      el: '.js-assignment-overrides',
+      model: dueDateList,
+      views: {
+        'due-date-overrides': new DueDateListView({
+          model: dueDateList
+        })
+      }
+    });
+
+    overrideView.render();
+  }
+
 
   var clickSetCorrect = I18n.t('titles.click_to_set_as_correct', "Click to set this answer as correct"),
       isSetCorrect = I18n.t('titles.set_as_correct', "This answer is set as correct"),
@@ -64,7 +128,7 @@ define([
 
     // Determines whether or not to show the "show question details" link.
     checkShowDetails: function() {
-      var hasQuestions = this.$questions.find('div.display_question:not(.essay_question, .text_only_question)').length;
+      var hasQuestions = this.$questions.find('div.display_question:not(.essay_question, .file_upload_question, .text_only_question)').length;
       this.$showDetailsWrap[hasQuestions ? 'show' : 'hide'](200);
     },
 
@@ -147,7 +211,7 @@ define([
 
       $answer.find(".comment_focus").attr('title', I18n.t('titles.click_to_enter_comments_on_answer', 'Click to enter comments for the student if they choose this answer'));
 
-      if (question_type == "essay_question") {
+      if (question_type == "essay_question" || question_type == "file_upload_question") {
         templateData.comments_header = I18n.beforeLabel('comments_on_question', "Comments for this question");
       } else if (question_type == "matching_question") {
         templateData.answer_match_left_html = answer.answer_match_left_html;
@@ -246,6 +310,10 @@ define([
         answer_type = "comment";
         question_type = "essay_question";
         n_correct = "none";
+      } else if (qt == 'file_upload_question') {
+        answer_type = "comment";
+        question_type = "file_upload_question";
+        n_correct = "none";
       } else if (qt == 'matching_question') {
         answer_type = "matching_answer";
         question_type = "matching_question";
@@ -283,6 +351,8 @@ define([
       } else if (question_type == 'short_answer_question') {
         result = "any_answer";
       } else if (question_type == 'essay_question') {
+        result = "none";
+      } else if (question_type == 'file_upload_question') {
         result = "none";
       } else if (question_type == 'matching_question') {
         result = "matching";
@@ -539,7 +609,7 @@ define([
         $formQuestion.find(".question_comment").css('display', 'none').end()
           .find(".question_neutral_comment").css('display', '');
       }
-      $formQuestion.find(".question_header").text("Question:");
+      $formQuestion.find(".question_header").text(I18n.t('question_colon', "Question:"));
       $formQuestion.addClass(question_type);
         $formQuestion.find(".question_points_holder").showIf(!$formQuestion.closest(".question_holder").hasClass('group') && question_type != 'text_only_question');
       $formQuestion.find("textarea.comments").each(function() {
@@ -579,7 +649,7 @@ define([
       } else if (question_type == 'short_answer_question') {
         $formQuestion.removeClass('selectable');
         result.answer_type = "short_answer";
-      } else if (question_type == 'essay_question') {
+      } else if (question_type == 'essay_question' || question_type == 'file_upload_question') {
         $formQuestion.find(".answer").remove();
         $formQuestion.removeClass('selectable');
         $formQuestion.find(".answers_header").hide().end()
@@ -671,7 +741,7 @@ define([
       });
       var tally = 0;
       $("#questions .question_holder:not(.group) .question:not(#question_new)").each(function() {     
-        var val = parseFloat($(this).find(".question_points:visible,.question_points.hidden").text());
+        var val = parseFloat($(this).find(".question_points,.question_points.hidden").text());
         if (isNaN(val)) { val = 0; }
         tally += val;
       });
@@ -683,7 +753,7 @@ define([
         tally += val * cnt;
       });
       tally = Math.round(tally * 100.0) / 100.0;
-      $("#quiz_options_form").find(".points_possible").text(tally);
+      $(".points_possible").text(tally);
     },
 
     findContainerGroup: function($obj) {
@@ -916,9 +986,8 @@ define([
 
   function generateFormQuiz(quiz) {
     var data = {};
-    var quizAssignmentId = quizAssignmentId || null;
-    if (quizAssignmentId) {
-      data['quiz[assignment_id]'] = quizAssignmentId;
+    if (ENV.ASSIGNMENT_ID) {
+      data['quiz[assignment_id]'] = ENV.ASSIGNMENT_ID;
     }
     data['quiz[title]'] = quiz.quiz_name;
     for(var idx in quiz.questions) {
@@ -1007,7 +1076,11 @@ define([
   $(document).ready(function() {
     quiz.init().updateDisplayComments();
 
+    $('#quiz_tabs').tabs();
+    $('#editor_tabs').show();
+
     var $quiz_options_form = $("#quiz_options_form");
+    var $quiz_edit_wrapper = $("#quiz_edit_wrapper");
     $.scrollSidebar();
     $(".datetime_field").datetime_field();
     $("#questions").delegate('.group_top,.question,.answer_select', 'mouseover', function(event) {
@@ -1034,13 +1107,15 @@ define([
       }
     }).triggerHandler('change');
 
-    $quiz_options_form.find("#time_limit_option").change(function() {
+    $quiz_options_form.find("#time_limit_option").change(function(event, noFocus) {
       if (!$(this).attr('checked')) {
         $("#quiz_time_limit").val("");
+      } else if (!noFocus) {
+        $("#quiz_time_limit").focus();
       }
-    }).triggerHandler('change');
+    }).triggerHandler('change', [true]);
 
-    $("#limit_attempts_option").change(function() {
+    $("#limit_attempts_option").change(function(event, noFocus) {
       var $item = $("#quiz_allowed_attempts");
       if ($(this).attr('checked')) {
         var val = parseInt($item.data('saved_value') || $item.val() || "2", 10);
@@ -1048,11 +1123,12 @@ define([
           val = 1;
         }
         $item.val(val);
+        if (!noFocus) { $item.focus(); }
       } else {
         $item.data('saved_value', $(this).val());
         $item.val('--');
       }
-    }).triggerHandler('change');
+    }).triggerHandler('change', [true]);
 
     $("#protect_quiz").change(function() {
       var checked = $(this).attr('checked');
@@ -1070,12 +1146,14 @@ define([
 
     $("#lockdown_browser_suboptions").showIf($("#quiz_require_lockdown_browser").attr('checked'));
 
-    $("#ip_filter").change(function() {
+    $("#ip_filter").change(function(event, noFocus) {
       $("#ip_filter_suboptions").showIf($(this).attr('checked'));
       if (!$(this).attr('checked')) {
         $("#quiz_ip_filter").val("");
+      } else if (!noFocus) {
+        $("#quiz_ip_filter").focus();
       }
-    }).triggerHandler('change');
+    }).triggerHandler('change', [true]);
 
     $("#ip_filters_dialog").delegate('.ip_filter', 'click', function(event) {
       event.preventDefault();
@@ -1095,7 +1173,7 @@ define([
       });
       if (!$dialog.hasClass('loaded')) {
         $dialog.find(".searching_message").text(I18n.t('retrieving_filters', "Retrieving Filters..."));
-        var url = $("#quiz_urls .filters_url").attr('href');
+        var url = ENV.QUIZZES_URL;
         $.ajaxJSON(url, 'GET', {}, function(data) {
           $dialog.addClass('loaded');
           if (data.length) {
@@ -1116,12 +1194,14 @@ define([
       }
     });
 
-    $("#require_access_code").change(function(event) {
+    $("#require_access_code").change(function(event, noFocus) {
       $("#access_code_suboptions").showIf($(this).attr('checked'));
       if (!$(this).attr('checked')) {
         $("#quiz_access_code").val("");
+      } else if (!noFocus) {
+        $("#quiz_access_code").focus();
       }
-    }).triggerHandler('change');
+    }).triggerHandler('change', [true]);
 
     $("#never_hide_results").change(function() {
       var $this = $(this);
@@ -1129,6 +1209,14 @@ define([
       if (!$this.attr('checked')) {
         $("#hide_results_only_after_last").attr('checked', false);
         $("#quiz_show_correct_answers").attr('checked', false);
+      }
+    }).triggerHandler('change');
+
+    $("#quiz_one_question_at_a_time").change(function() {
+      var $this = $(this);
+      $("#one_question_at_a_time_options").showIf($this.attr('checked'));
+      if (!$this.attr('checked')) {
+        $("#quiz_cant_go_back").attr('checked', false);
       }
     }).triggerHandler('change');
 
@@ -1151,24 +1239,24 @@ define([
       }
     }).triggerHandler('change');
 
-    $quiz_options_form.find(".save_quiz_button").click(function() {
-      $quiz_options_form.data('activator', 'save');
-    });
-
-    $quiz_options_form.find(".publish_quiz_button").click(function() {
-      $quiz_options_form.data('activator', 'publish');
-    });
+    var hasCheckedOverrides = false;
 
     $quiz_options_form.formSubmit({
       object_name: "quiz",
-      required: ['title'],
 
       processData: function(data) {
         $(this).attr('method', 'PUT');
-        if ($(this).data('submit_type') == 'save_only') {
-          delete data['activate'];
+        var quiz_title = $("#quiz_title").val();
+        if (quiz_title.length == 0) {
+          var offset = $("#quiz_title").errorBox(I18n.t('errors.field_is_required', "This field is required")).offset();
+          $('html,body').scrollTo({top: offset.top, left:0});
+          return false;
         }
+        data['quiz[title]'] = quiz_title;
         data['quiz[description]'] = $("#quiz_description").editorBox('get_code');
+        if ($("#quiz_notify_of_update").is(':checked')) {
+          data['quiz[notify_of_update]'] = $("#quiz_notify_of_update").val();
+        }
         var attempts = 1;
         if (data.multiple_attempts) {
           attempts = parseInt(data.allowed_attempts, 10);
@@ -1176,31 +1264,71 @@ define([
         }
         data.allowed_attempts = attempts;
         data['quiz[allowed_attempts]'] = attempts;
+        overrideView.updateOverrides();
+        var overrides = overrideView.getOverrides();
+        var quizData = overrideView.getDefaultDueDate();
+        if (quizData) {
+          quizData = quizData.toJSON().assignment_override;
+        } else {
+          quizData = {};
+        }
+        var validationData = {
+          assignment_overrides: overrideView.getAllDates(quizData)
+        };
+        var errs = overrideView.validateBeforeSave(validationData,{});
+        if (_.keys(errs).length > 0) {
+          return false;
+        }
+        else if (overrideView.containsSectionsWithoutOverrides() && !hasCheckedOverrides) {
+          sections = overrideView.sectionsWithoutOverrides();
+          var missingDateView = new MissingDateDialog({
+            validationFn: function(){ return sections },
+            labelFn: function( section ) { return section.get('name')},
+            success: function(){
+              missingDateView.$dialog.dialog('close').remove();
+              missingDateView.remove();
+              hasCheckedOverrides = true;
+              $quiz_options_form.trigger('submit');
+            }
+          });
+          missingDateView.cancel = function() {
+            missingDateView.$dialog.dialog('close').remove();
+          };
+          missingDateView.render();
+          return false;
+        } else {
+          var finalQuiz = overrideView.getDefaultDueDate();
+          if (finalQuiz) {
+            finalQuiz = finalQuiz.toJSON().assignment_override;
+            adjustOverridesForFormParams([finalQuiz]);
+            data['quiz[due_at]'] = finalQuiz.due_at || ""
+            data['quiz[unlock_at]'] = finalQuiz.unlock_at || "";
+            data['quiz[lock_at]'] = finalQuiz.lock_at || "";
+          }
+          else {
+            data['quiz[due_at]'] = "";
+            data['quiz[unlock_at]'] = "";
+            data['quiz[lock_at]'] = "";
+          }
+          adjustOverridesForFormParams(overrides);
+          if (overrides.length === 0) { overrides = false; }
+          data['quiz[assignment_overrides]'] = overrides;
+        }
         return data;
       },
 
       beforeSubmit: function(data) {
-        $(this).find(".btn.save_quiz_button").attr('disabled', true);
-        $(this).find(".btn.publish_quiz_button").attr('disabled', true);
-        if ($(this).data('activator') == 'publish') {
-          $(this).find(".btn.publish_quiz_button").text(I18n.t('buttons.publishing', "Publishing..."));
-        } else {
-          $(this).find(".btn.save_quiz_button").text(I18n.t('buttons.saving', "Saving..."));
-        }
+        $quiz_edit_wrapper
+          .find(".btn.save_quiz_button")
+          .attr('disabled', true)
+          .text(I18n.t('buttons.saving', "Saving..."));
       },
 
       success: function(data) {
         var $form = $(this);
-        $(this).find(".btn.save_quiz_button").attr('disabled', false);
-        $(this).find(".btn.publish_quiz_button").attr('disabled', false);
-        if ($(this).data('activator') == 'publish') {
-          $(this).find(".btn.publish_quiz_button").text(I18n.t('buttons.published', "Published!"));
-        } else {
-          $(this).find(".btn.save_quiz_button").text(I18n.t('buttons.saved', "Saved!"));
-        }
-        setTimeout(function() {
-          $form.find(".btn.save_quiz_button").text(I18n.t('buttons.save_settings', "Save Settings"));
-        }, 2500);
+        $quiz_edit_wrapper
+          .find(".btn.save_quiz_button")
+          .text(I18n.t('buttons.saved', "Saved!"));
         if (data.quiz.assignment) {
           var assignment = data.quiz.assignment;
           if ($("#assignment_option_" + assignment.id).length === 0) {
@@ -1217,29 +1345,20 @@ define([
         }
         $(".show_rubric_link").showIf(data.quiz.assignment);
         $("#quiz_assignment_id").val(data.quiz.quiz_type || "practice_quiz").change();
-        if ($(this).data('submit_type') == 'save_and_publish') {
-          location.href = $(this).attr('action');
-        } else {
-          $.flashMessage(I18n.t('notices.quiz_data_saved', "Quiz data saved"));
-        }
+        location.href = $(this).attr('action');
         quiz.updateDisplayComments();
     },
     error: function(data) {
       $(this).formErrors(data);
-      $(this).find(".btn.save_quiz_button").attr('disabled', false);
-      $(this).find(".btn.publish_quiz_button").attr('disabled', false);
+      $quiz_edit_wrapper.find(".btn.save_quiz_button").attr('disabled', false);
       }
     });
 
-    $quiz_options_form.find(".save_quiz_button").click(function(event) {
+    $quiz_edit_wrapper.find(".save_quiz_button").click(function(event) {
       event.preventDefault();
       event.stopPropagation();
       $quiz_options_form.data('submit_type', 'save_only').submit();
-    }).end().find(".publish_quiz_button").click(function(event) {
-      event.preventDefault();
-      event.stopPropagation();
-      $quiz_options_form.data('submit_type', 'save_and_publish').submit();
-    });
+    }).end();
 
     $("#show_question_details").change(function(event) {
       $("#questions").toggleClass('brief', !$(this).attr('checked'));
@@ -1271,7 +1390,7 @@ define([
       $("#quiz_options_form .quiz_survey_setting").showIf(assignment_id && assignment_id.match(/survey/));
       $("#quiz_points_possible").showIf(assignment_id == 'graded_survey');
       $("#survey_instructions").showIf(assignment_id == 'survey' || assignment_id == 'graded_survey');
-      $("#quiz_assignment_group").showIf(assignment_id == 'assignment' || assignment_id == 'graded_survey');
+      $("#quiz_assignment_group_id").closest('.control-group').showIf(assignment_id == 'assignment' || assignment_id == 'graded_survey');
       $("#questions").toggleClass('survey_quiz', assignment_id == 'survey' || assignment_id == 'graded_survey');
       $("#quiz_display_points_possible").showIf(assignment_id != 'survey' && assignment_id != 'graded_survey');
       $("#quiz_options_holder").toggleClass('survey_quiz', assignment_id == 'survey' || assignment_id == 'graded_survey');
@@ -1417,7 +1536,7 @@ define([
           $form.find(".form_answers").append($answer);
         });
       }
-      if ($question.hasClass('essay_question')) {
+      if ($question.hasClass('essay_question') || $question.hasClass('file_upload')) {
         $formQuestion.find(".comments_header").text(I18n.beforeLabel('comments_on_question', "Comments for this question"));
       }
       $question.hide().after($form);
@@ -1913,6 +2032,12 @@ define([
         }];
         answer_type = "comment";
         question_type = "essay_question";
+      } else if ($question.hasClass('file_upload_question')) {
+        var answers = [{
+          comments: I18n.t('default_response_to_file_upload', "Response to show student after they submit an answer")
+        }];
+        answer_type = "comment";
+        question_type = "file_upload_question";
       } else if ($question.hasClass('matching_question')) {
         var answers = [{
           comments: I18n.t('default_comments_on_wrong_match', "Response if the user misses this match")
@@ -2004,7 +2129,7 @@ define([
           error_text = I18n.t('errors.no_possible_solution', "Please generate at least one possible solution");
         }
       } else if ($answers.length === 0 || $answers.filter(".correct_answer").length === 0) {
-        if ($answers.length === 0 && questionData.question_type != "essay_question" && questionData.question_type != "text_only_question") {
+        if ($answers.length === 0 && !_.contains(["essay_question", "file_upload_question", "text_only_question"], questionData.question_type)) {
           error_text = I18n.t('errors.no_answer', "Please add at least one answer");
         } else if ($answers.filter(".correct_answer").length === 0 && (questionData.question_type == "multiple_choice_question" || questionData.question_type == "true_false_question" || questionData.question_tyep == "missing_word_question")) {
           error_text = I18n.t('errors.no_correct_answer', "Please choose a correct answer");
@@ -2226,7 +2351,6 @@ define([
         var $group = $form.parents(".group_top");
         var group = data.quiz_group;
         $form.loadingImage('remove');
-        var $group = $form.parents(".group_top");
         $group.removeClass('editing');
         $group.fillTemplateData({
           data: group,
@@ -2244,6 +2368,7 @@ define([
           $group.next(".assessment_question_bank").fillTemplateData({data: bank, hrefValues: ['bank_id', 'context_type_string', 'context_id']})
             .find(".bank_name").hide().filter(".bank_name_link").show();
         }
+        $group.find(".find_bank_link").hide();
         $group.fillFormData(data, {object_name: 'quiz_group'});
         var $bottom = $group.next();
         while($bottom.length > 0 && !$bottom.hasClass('group_bottom')) {
@@ -2486,20 +2611,6 @@ define([
       wikiSidebar.attachToEditor($editor);
     });
 
-    $(".quiz_options_link,.link_to_content_link").click(function(event) {
-      event.preventDefault();
-      $("#quiz_content_links,#quiz_options_holder").toggle();
-      if ($("#quiz_content_links:visible").length > 0) {
-        if (wikiSidebar) {
-          wikiSidebar.show();
-        }
-      } else {
-        if (wikiSidebar) {
-          wikiSidebar.hide();
-        }
-      }
-    });
-
     $("#calc_helper_methods").change(function() {
       var method = $(this).val();
       $("#calc_helper_method_description").text(calcCmd.functionDescription(method));
@@ -2508,6 +2619,15 @@ define([
     });
 
     $("#equations_dialog_tabs").tabs();
+
+    $(".delete_quiz_link").click(function(event) {
+      event.preventDefault();
+      $(this).parents(".quiz").confirmDelete({
+        message: I18n.t('confirms.delete_quiz', "Are you sure you want to delete this quiz?"),
+        url: $(this).attr('href'),
+        success: function() { window.location.replace(ENV.QUIZZES_URL); }
+      });
+    });
   });
 
   $.fn.multipleAnswerSetsQuestion = function() {
@@ -2526,7 +2646,7 @@ define([
         return;
       }
       var text = $(this).editorBox('get_code');
-      var matches = text.match(/\[[A-Za-z][A-Za-z0-9]*\]/g);
+      var matches = text.match(/\[[A-Za-z0-9_\-.]+\]/g);
       $select.find("option.shown_when_no_other_options_available").remove();
       $select.find("option").addClass('to_be_removed');
       var matchHash = {};
@@ -2541,7 +2661,6 @@ define([
               }
               $option
                 .removeClass('to_be_removed')
-                .addClass(variable)
                 .val(variable)
                 .text(variable);
               matchHash[variable] = true;

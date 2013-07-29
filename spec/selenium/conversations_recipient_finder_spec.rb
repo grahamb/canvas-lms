@@ -2,9 +2,14 @@ require File.expand_path(File.dirname(__FILE__) + '/helpers/conversations_common
 
 describe "conversations recipient finder" do
   it_should_behave_like "in-process server selenium tests"
-  it_should_behave_like "conversations selenium tests"
+
+  def conversations_path(params={})
+    hash = params.to_json.unpack('H*').first
+    "/conversations##{hash}"
+  end
 
   before(:each) do
+    conversation_setup
     @course.update_attribute(:name, "the course")
     @course.default_section.update_attribute(:name, "the section")
     @other_section = @course.course_sections.create(:name => "the other section")
@@ -26,6 +31,7 @@ describe "conversations recipient finder" do
     menu.should == ["the course", "the group"]
     browse "the course" do
       menu.should == ["Everyone", "Teachers", "Students", "Course Sections", "Student Groups"]
+      toggleable.should == ["Everyone", "Teachers", "Students"]
       browse("Everyone") { menu.should == ["Select All", "nobody@example.com", "student 1", "student 2"] }
       browse("Teachers") { menu.should == ["nobody@example.com"] }
       browse("Students") { menu.should == ["Select All", "student 1", "student 2"] }
@@ -38,6 +44,40 @@ describe "conversations recipient finder" do
         browse "the section" do
           menu.should == ["Everyone", "Teachers", "Students"]
           browse("Everyone") { menu.should == ["Select All", "nobody@example.com", "student 1"] }
+          browse("Teachers") { menu.should == ["nobody@example.com"] }
+          browse("Students") { menu.should == ["student 1"] }
+        end
+      end
+      browse "Student Groups" do
+        menu.should == ["the group"]
+        browse("the group") { menu.should == ["Select All", "nobody@example.com", "student 1"] }
+      end
+    end
+    browse("the group") { menu.should == ["Select All", "nobody@example.com", "student 1"] }
+  end
+
+  it "should respect permissions" do
+    # only affects courses/sections, not groups
+    RoleOverride.create!(:context => Account.default, :permission => 'send_messages_all', :enrollment_type => 'TeacherEnrollment', :enabled => false)
+
+    browse_menu
+
+    menu.should == ["the course", "the group"]
+    browse "the course" do
+      menu.should == ["Everyone", "Teachers", "Students", "Course Sections", "Student Groups"]
+      toggleable.should == []
+      browse("Everyone") { menu.should == ["nobody@example.com", "student 1", "student 2"] }
+      browse("Teachers") { menu.should == ["nobody@example.com"] }
+      browse("Students") { menu.should == ["student 1", "student 2"] }
+      browse "Course Sections" do
+        menu.should == ["the other section", "the section"]
+        browse "the other section" do
+          menu.should == ["Students"]
+          browse("Students") { menu.should == ["student 2"] }
+        end
+        browse "the section" do
+          menu.should == ["Everyone", "Teachers", "Students"]
+          browse("Everyone") { menu.should == ["nobody@example.com", "student 1"] }
           browse("Teachers") { menu.should == ["nobody@example.com"] }
           browse("Students") { menu.should == ["student 1"] }
         end
@@ -102,7 +142,7 @@ describe "conversations recipient finder" do
     end
   end
 
-  it "should have working 'select all' checkboxes in appropriate contexts" do
+  it "should have working select all checkboxes in appropriate contexts" do
     browse_menu
 
     browse "the course" do
@@ -164,7 +204,7 @@ describe "conversations recipient finder" do
 
   it "should allow searching" do
     search("t") do
-      menu.should == ["the course", "the other section", "the section", "student 1", "student 2"]
+      menu.should == ["the course", "the other section", "the section", "the group", "student 1", "student 2"]
     end
   end
 
@@ -236,7 +276,7 @@ describe "conversations recipient finder" do
   it "should allow a non-contactable user in the hash if a shared conversation exists" do
     other = User.create(:name => "other guy")
     # if the users have a conversation in common already, then the recipient can be added
-    c = Conversation.initiate([@user.id, other.id], true)
+    c = Conversation.initiate([@user, other], true)
     get conversations_path(:user_id => other.id, :from_conversation_id => c.id)
     wait_for_ajaximations
     tokens.should == ["other guy"]

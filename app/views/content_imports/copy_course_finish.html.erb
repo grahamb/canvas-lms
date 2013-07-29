@@ -96,10 +96,10 @@ HEREDOC
         <% end %>
       </ul>
     <% end %>
-    <% if @context.context_modules.active.length > 0 %>
+    <% if @context.context_modules.not_deleted.length > 0 %>
       <h3><%= image_tag 'ball.png' %> <%= t('labels.modules', "Modules for %{course}", :course => @context.name) %></h3>
       <ul class="unstyled_list root_asset_list">
-        <% @context.context_modules.active.each do |mod| %>
+        <% @context.context_modules.not_deleted.each do |mod| %>
           <li class="<%= 'added' if @copies.include?(mod.asset_string) %>"><%= mod.name %></li>
         <% end %>
       </ul>
@@ -121,7 +121,7 @@ HEREDOC
       </ul>
     <% end %>
     <% if @context.context_external_tools.active.length > 0 %>
-      <h3><%= t('labels.external_tools', "External Tools for %{course}", :course => @context.name) %></h3>
+      <h3><%= t('labels.apps', "Apps for %{course}", :course => @context.name) %></h3>
       <ul class="unstyled_list asset_list">
         <% @context.context_external_tools.active.each do |tool| %>
           <li class="<%= 'added' if @copies.include?(tool.asset_string) %>"><%= tool.name %></li>

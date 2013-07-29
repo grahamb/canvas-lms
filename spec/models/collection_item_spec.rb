@@ -35,12 +35,12 @@ describe 'CollectionItem' do
       @user2.visible_stream_item_instances.should be_empty
       items = @user1.visible_stream_item_instances.map(&:stream_item)
       items.size.should == 1
-      items.first.data.type.should == 'CollectionItem'
+      items.first.data.class.name.should == 'CollectionItem'
     end
   end
 
   context "across shards" do
-    it_should_behave_like "sharding"
+    specs_require_sharding
 
     it "should handle user upvotes on another shard" do
       @shard1.activate { @user1 = user_model }

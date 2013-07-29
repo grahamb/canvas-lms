@@ -1,9 +1,10 @@
-require File.expand_path(File.dirname(__FILE__) + '/common')
+require File.expand_path(File.dirname(__FILE__) + '/helpers/quizzes_common')
 
 describe "equation editor" do
-  it_should_behave_like "in-process server selenium tests"
+  it_should_behave_like "quizzes selenium tests"
 
   it "should support multiple equation editors on the same page" do
+    pending("193")
     course_with_teacher_logged_in
 
     get "/courses/#{@course.id}/quizzes"
@@ -15,9 +16,9 @@ describe "equation editor" do
     end
     wait_for_tiny(f("#quiz_description"))
 
-    new_question_link = f('.add_question_link')
     2.times do |time|
-      new_question_link.click
+      click_questions_tab
+      click_new_question_button
 
       questions = ffj(".question_holder:visible")
       questions.length.should == time + 1
@@ -38,7 +39,9 @@ describe "equation editor" do
       save_question_and_wait
 
       question.find_elements(:css, 'img.equation_image').size.should == 1
-      f("#right-side .points_possible").text.should == (time + 1).to_s
+
+      click_settings_tab
+      f(".points_possible").text.should == (time + 1).to_s
     end
   end
 end

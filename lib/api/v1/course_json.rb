@@ -27,7 +27,7 @@ module Api::V1
     end
     
     def methods_to_send
-      methods = ['end_at']
+      methods = ['end_at', 'public_syllabus', 'storage_quota_mb']
       methods << 'hide_final_grades' if @includes.include?(:hide_final_grades)
       methods
     end
@@ -37,7 +37,8 @@ module Api::V1
       @hash['enrollments'] = extract_enrollments( @enrollments )
       @hash['needs_grading_count'] = needs_grading_count(@enrollments, @course) 
       @hash['public_description'] = description(@course)
-      @hash['hide_final_grades'] = (@course.hide_final_grades.to_s == 'true')
+      @hash['hide_final_grades'] = @course.hide_final_grades?
+      @hash['workflow_state'] = @course.api_state
       clear_unneeded_fields(@hash)
     end
 
@@ -69,11 +70,12 @@ module Api::V1
     def extract_enrollments( enrollments )
       if enrollments
         enrollments.map do |e|
-          h = { :type => e.readable_type.downcase }
+          h = { :type => e.readable_type.downcase, :role => e.role }
           if include_total_scores && e.student?
             h.merge!(
               :computed_current_score => e.computed_current_score,
               :computed_final_score => e.computed_final_score,
+              :computed_current_grade => e.computed_current_grade,
               :computed_final_grade => e.computed_final_grade)
           end
           h
@@ -88,7 +90,7 @@ module Api::V1
     end
     
     def include_total_scores 
-      @includes.include?(:total_scores) && !@course.settings[:hide_final_grade]
+      @includes.include?(:total_scores) && !@course.hide_final_grades?
     end
 
   end

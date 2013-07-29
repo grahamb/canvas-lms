@@ -1,3 +1,4 @@
+require 'lib/canvas/require_js/plugin_extension'
 module Canvas
   module RequireJs
     class << self
@@ -7,6 +8,10 @@ module Canvas
 
       PATH_REGEX = %r{.*?/javascripts/(plugins/)?(.*)\.js\z}
       JS_ROOT = "#{Rails.root}/public/javascripts"
+
+      def matcher
+        ENV['JS_SPEC_MATCHER'] || '**/*Spec.js'
+      end
 
       # get all regular canvas (and plugin) bundles
       def app_bundles
@@ -46,13 +51,13 @@ module Canvas
         bundle == '*' ? result : (result[bundle.to_s] || [])
       end
 
-      def paths
+      def paths(cache_busting = false)
         @paths ||= {
           :common => 'compiled/bundles/common',
           :jqueryui => 'vendor/jqueryui',
           :use => 'vendor/use',
           :uploadify => '../flash/uploadify/jquery.uploadify-3.1.min'
-        }.update(plugin_paths).to_json.gsub(/([,{])/, "\\1\n    ")
+        }.update(cache_busting ? cache_busting_paths : {}).update(plugin_paths).update(Canvas::RequireJs::PluginExtension.paths).to_json.gsub(/([,{])/, "\\1\n    ")
       end
   
       def plugin_paths
@@ -65,6 +70,10 @@ module Canvas
         end
       end
 
+      def cache_busting_paths
+        { 'compiled/tinymce' => 'compiled/tinymce.js?v2' } # hack: increment to purge browser cached bundles after tiny change
+      end
+      
       def shims
         <<-JS.gsub(%r{\A +|^ {8}}, '')
           {
@@ -100,6 +109,11 @@ module Canvas
             'uploadify' : {
               deps: ['jquery'],
               attach: '$'
+            },
+
+            'vendor/FileAPI/FileAPI.min': {
+              deps: ['jquery', 'vendor/FileAPI/config'],
+              attach: 'FileAPI'
             }
           }
         JS

@@ -21,30 +21,18 @@ module Canvas
   end
 
   def self.redis
-    return @redis if @redis
-    # create the redis cluster connection using config/redis.yml
-    redis_settings = Setting.from_config('redis')
-    raise("Redis is not enabled for this install") if redis_settings.blank?
-    @redis = redis_from_config(redis_settings)
+    raise "Redis is not enabled for this install" unless Canvas.redis_enabled?
+    @redis ||= begin
+      settings = Setting.from_config('redis')
+      Canvas::RedisConfig.from_settings(settings).redis
+    end
   end
 
   # Builds a redis object using a config hash in the format used by a couple
   # different config/*.yml files, like redis.yml, cache_store.yml and
   # delayed_jobs.yml
   def self.redis_from_config(redis_settings)
-    Bundler.require 'redis'
-    if redis_settings.is_a?(Array)
-      redis_settings = { :servers => redis_settings }
-    end
-    # convert string addresses to options hash, and disable redis-cache's built-in marshalling code
-    redis_settings[:servers].map! { |s|
-      ::Redis::Factory.convert_to_redis_client_options(s).merge(:marshalling => false)
-    }
-    redis = ::Redis::Factory.create(redis_settings[:servers])
-    if redis_settings[:database].present?
-      redis.select(redis_settings[:database])
-    end
-    redis
+    RedisConfig.from_settings(redis_settings).redis
   end
 
   def self.redis_enabled?
@@ -61,6 +49,9 @@ module Canvas
   end
 
   def self.cache_store_config(rails_env = :current, nil_is_nil = false)
+    # this method is called really early in the bootup process, and autoloading
+    # might not be available yet, so we need to manually require Setting
+    require_dependency "app/models/setting"
     cache_store_config = {
       'cache_store' => 'mem_cache_store',
     }.merge(Setting.from_config('cache_store', rails_env) || {})
@@ -74,6 +65,7 @@ module Canvas
       end
     when 'redis_store'
       Bundler.require 'redis'
+      require_dependency 'canvas/redis'
       Canvas::Redis.patch
       # merge in redis.yml, but give precedence to cache_store.yml
       #
@@ -86,10 +78,12 @@ module Canvas
     when 'memory_store'
       config = :memory_store
     when 'nil_store'
-      config = :nil_store
+      require 'nil_store'
+      config = NilStore.new
     end
     if !config && !nil_is_nil
-      config = :nil_store
+      require 'nil_store'
+      config = NilStore.new
     end
     config
   end
@@ -128,7 +122,7 @@ module Canvas
   def self.reloadable_plugin(dirname)
     return unless Rails.env.development?
     base_path = File.expand_path(dirname)
-    ActiveSupport::Dependencies.load_once_paths.reject! { |p|
+    ActiveSupport::Dependencies.autoload_once_paths.reject! { |p|
       p[0, base_path.length] == base_path
     }
   end

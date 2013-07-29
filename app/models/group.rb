@@ -22,7 +22,7 @@ class Group < ActiveRecord::Base
   include CustomValidations
   include UserFollow::FollowedItem
 
-  attr_accessible :name, :context, :max_membership, :group_category, :join_level, :default_view, :description, :is_public, :avatar_attachment
+  attr_accessible :name, :context, :max_membership, :group_category, :join_level, :default_view, :description, :is_public, :avatar_attachment, :storage_quota_mb
   validates_allowed_transitions :is_public, false => true
 
   has_many :group_memberships, :dependent => :destroy, :conditions => ['group_memberships.workflow_state != ?', 'deleted']
@@ -48,6 +48,7 @@ class Group < ActiveRecord::Base
   has_many :active_folders, :class_name => 'Folder', :as => :context, :conditions => ['folders.workflow_state != ?', 'deleted'], :order => 'folders.name'
   has_many :active_folders_with_sub_folders, :class_name => 'Folder', :as => :context, :include => [:active_sub_folders], :conditions => ['folders.workflow_state != ?', 'deleted'], :order => 'folders.name'
   has_many :active_folders_detailed, :class_name => 'Folder', :as => :context, :include => [:active_sub_folders, :active_file_attachments], :conditions => ['folders.workflow_state != ?', 'deleted'], :order => 'folders.name'
+  has_many :collaborators
   has_many :external_feeds, :as => :context, :dependent => :destroy
   has_many :messages, :as => :context, :dependent => :destroy
   belongs_to :wiki
@@ -71,7 +72,7 @@ class Group < ActiveRecord::Base
 
   def participating_users(user_ids = nil)
     user_ids ?
-      participating_users_association.scoped(:conditions => {:id => user_ids}) :
+      participating_users_association.where(:id =>user_ids) :
       participating_users_association
   end
 
@@ -98,6 +99,10 @@ class Group < ActiveRecord::Base
       (self.group_category.restricted_self_signup? && self.has_common_section_with_user?(user)))
   end
 
+  def full?
+    group_category && group_category.group_limit && participating_users.size >= group_category.group_limit
+  end
+
   def free_association?(user)
     auto_accept? || allow_join_request? || allow_self_signup?(user)
   end
@@ -112,7 +117,7 @@ class Group < ActiveRecord::Base
   end
 
   def context_code
-    raise "DONT USE THIS, use .short_name instead" unless ENV['RAILS_ENV'] == "production"
+    raise "DONT USE THIS, use .short_name instead" unless Rails.env.production?
   end
 
   def appointment_context_codes
@@ -147,6 +152,14 @@ class Group < ActiveRecord::Base
     Group.find(ids)
   end
 
+  def self.not_in_group_sql_fragment(groups, prepend_and = true)
+    "#{"AND" if prepend_and} NOT EXISTS (SELECT * FROM group_memberships gm
+                      WHERE gm.user_id = users.id AND
+                      gm.workflow_state != 'deleted' AND
+                      gm.group_id IN (#{groups.map(&:id).join ','}))" unless groups.empty?
+
+  end
+
   workflow do
     state :available do
       event :complete, :transitions_to => :completed
@@ -176,12 +189,11 @@ class Group < ActiveRecord::Base
 
   def close_memberships_if_deleted
     return unless self.deleted?
-    memberships = self.group_memberships
-    User.update_all({:updated_at => Time.now.utc}, {:id => memberships.map(&:user_id).uniq})
-    GroupMembership.update_all({:workflow_state => 'deleted'}, {:id => memberships.map(&:id).uniq})
+    User.where(:id => group_memberships.pluck(:user_id)).update_all(:updated_at => Time.now.utc)
+    group_memberships.update_all(:workflow_state => 'deleted')
   end
 
-  named_scope :active, :conditions => ['groups.workflow_state != ?', 'deleted']
+  scope :active, where("groups.workflow_state<>'deleted'")
 
   def full_name
     res = before_label(self.name) + " "
@@ -243,7 +255,7 @@ class Group < ActiveRecord::Base
 
   def peer_groups
     return [] if !self.context || !self.group_category || self.group_category.allows_multiple_memberships?
-    self.group_category.groups.find(:all, :conditions => ["id != ?", self.id])
+    self.group_category.groups.where("id<>?", self).all
   end
 
   def migrate_content_links(html, from_course)
@@ -310,7 +322,10 @@ class Group < ActiveRecord::Base
     can :read and 
     can :read_roster and
     can :send_messages and
-    can :follow
+    can :send_messages_all and
+    can :follow and
+    can :view_unpublished_items and
+    can :view_hidden_items
 
     # if I am a member of this group and I can moderate_forum in the group's context
     # (makes it so group members cant edit each other's discussion entries)
@@ -321,7 +336,7 @@ class Group < ActiveRecord::Base
     can :delete and
     can :manage and
     can :manage_admin_users and
-    can :manage_students and 
+    can :manage_students and
     can :moderate_forum and
     can :update
 
@@ -346,7 +361,9 @@ class Group < ActiveRecord::Base
     can :post_to_forum and
     can :read and
     can :read_roster and
-    can :update
+    can :update and
+    can :view_unpublished_items and
+    can :view_hidden_items
 
     given { |user, session| self.context && self.context.grants_right?(user, session, :view_group_pages) }
     can :read and can :read_roster
@@ -366,6 +383,10 @@ class Group < ActiveRecord::Base
     can :leave
   end
 
+  def users_visible_to(user)
+    grants_rights?(user, :read) ? users : users.where("?", false)
+  end
+
   # Helper needed by several permissions, use grants_right?(user, :participate)
   def can_participate?(user)
     return false unless user.present? && self.context.present?
@@ -378,6 +399,12 @@ class Group < ActiveRecord::Base
     return false
   end
   private :can_participate?
+
+  # courses lock this down a bit, but in a group, the fact that you are a
+  # member is good enough
+  def user_can_manage_own_discussion_posts?(user)
+    true
+  end
 
   def file_structure_for(user)
     User.file_structure_for(self, user)
@@ -404,9 +431,21 @@ class Group < ActiveRecord::Base
   end
 
   def quota
-    self.storage_quota || Setting.get_cached('group_default_quota', 50.megabytes.to_s).to_i
+    return self.storage_quota || self.account.default_group_storage_quota || self.class.default_storage_quota
   end
 
+  def self.default_storage_quota
+    Setting.get_cached('group_default_quota', 50.megabytes.to_s).to_i
+  end
+
+  def storage_quota_mb
+    quota / 1.megabyte
+  end
+  
+  def storage_quota_mb=(val)
+    self.storage_quota = val.try(:to_i).try(:megabytes)
+  end
+  
   TAB_HOME, TAB_PAGES, TAB_PEOPLE, TAB_DISCUSSIONS, TAB_CHAT, TAB_FILES,
     TAB_CONFERENCES, TAB_ANNOUNCEMENTS, TAB_PROFILE, TAB_SETTINGS, TAB_COLLABORATIONS = *1..20
   def tabs_available(user=nil, opts={})
@@ -440,7 +479,7 @@ class Group < ActiveRecord::Base
         begin
           import_from_migration(group, migration.context)
         rescue
-          migration.add_warning("Couldn't import group \"#{group[:title]}\"", $!)
+          migration.add_import_warning(t('#migration.group_type', "Group"), group[:title], $!)
         end
       end
     end
@@ -514,5 +553,27 @@ class Group < ActiveRecord::Base
 
   def default_collection_name
     t "#group.default_collection_name", "%{group_name}'s Collection", :group_name => self.name
+  end
+
+  def associated_shards
+    [Shard.default]
+  end
+
+  class Bookmarker
+    def self.bookmark_for(group)
+      group.id
+    end
+
+    def self.validate(bookmark)
+      bookmark.is_a?(Fixnum)
+    end
+
+    def self.restrict_scope(scope, pager)
+      if bookmark = pager.current_bookmark
+        comparison = (pager.include_bookmark ? 'groups.id >= ?' : 'groups.id > ?')
+        scope = scope.where(comparison, bookmark)
+      end
+      scope.order("groups.id ASC")
+    end
   end
 end

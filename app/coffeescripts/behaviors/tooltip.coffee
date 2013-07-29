@@ -47,22 +47,22 @@ define [
     right:
       my: "left center"
       at: "right+#{CARET_SIZE} center"
-      collision: 'none none'
+      collision: 'flipfit flipfit'
     left:
       my: "right center"
       at: "left-#{CARET_SIZE} center"
-      collision: 'none none'
+      collision: 'flipfit flipfit'
     top:
       my: "center bottom"
       at: "center top-#{CARET_SIZE}"
-      collision: 'none none'
+      collision: 'flipfit flipfit'
 
     bottom:
       my: "center top"
       at: "center bottom+#{CARET_SIZE}"
-      collision: 'none none'
+      collision: 'flipfit flipfit'
 
-  $('body').on 'mouseover', '[data-tooltip]', (event) ->
+  $('body').on 'mouseenter', '[data-tooltip]', (event) ->
     $this = $(this)
     opts = $this.data('tooltip')
 
@@ -74,6 +74,8 @@ define [
     opts.position ||= 'top'
     if opts.position of positions
       opts.position = positions[opts.position]
+    if opts.collision
+      opts.position.collision = opts.collision
 
     opts.position.using ||= using
 
@@ -81,3 +83,4 @@ define [
       .removeAttr('data-tooltip')
       .tooltip(opts)
       .tooltip('open')
+      .click -> $this.tooltip('close')

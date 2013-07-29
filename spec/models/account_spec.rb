@@ -24,13 +24,13 @@ describe Account do
     @account = Account.new
     lambda{@account.courses}.should_not raise_error
   end
-  
+
   context "equella_settings" do
     it "should respond to :equella_settings" do
       Account.new.should respond_to(:equella_settings)
       Account.new.equella_settings.should be_nil
     end
-    
+
     it "should return the equella_settings data if defined" do
       a = Account.new
       a.equella_endpoint = "http://oer.equella.com/signon.do"
@@ -39,7 +39,7 @@ describe Account do
       a.equella_settings.default_action.should_not be_nil
     end
   end
-  
+
   # it "should have an atom feed" do
     # account_model
     # @a.to_atom.should be_is_a(Atom::Entry)
@@ -110,6 +110,7 @@ describe Account do
         "S008S,C001S,Sec8,,,deleted",
         "S009S,C008S,Sec9,,,active"
       ])
+
       process_csv_data_cleanly([
         "course_id,user_id,role,section_id,status,associated_user_id",
         ",U001,student,S001,active,",
@@ -131,22 +132,22 @@ describe Account do
         ",U008,student,S008S,active,",
         ",U009,student,S005S,deleted,"
       ])
-      
     end
-    
+
     context "fast list" do
       it "should list associated courses" do
         @account.fast_all_courses.map(&:sis_source_id).sort.should == [
           "C001", "C005", "C006", "C007", "C008", "C009",
+          
           "C001S", "C005S", "C006S", "C007S", "C008S", "C009S", ].sort
       end
-    
+
       it "should list associated courses by term" do
         @account.fast_all_courses({:term => EnrollmentTerm.find_by_sis_source_id("T001")}).map(&:sis_source_id).sort.should == ["C001", "C001S"]
         @account.fast_all_courses({:term => EnrollmentTerm.find_by_sis_source_id("T002")}).map(&:sis_source_id).sort.should == []
         @account.fast_all_courses({:term => EnrollmentTerm.find_by_sis_source_id("T003")}).map(&:sis_source_id).sort.should == ["C005", "C006", "C007", "C008", "C009", "C005S", "C006S", "C007S", "C008S", "C009S"].sort
       end
-    
+
       it "should list associated nonenrollmentless courses" do
         @account.fast_all_courses({:hide_enrollmentless_courses => true}).map(&:sis_source_id).sort.should == ["C001", "C005", "C007", "C001S", "C005S", "C007S"].sort #C007 probably shouldn't be here, cause the enrollment section is deleted, but we kinda want to minimize database traffic
       end
@@ -258,11 +259,26 @@ describe Account do
 
     describe "services_exposed_to_ui_hash" do
       it "should return all ui services by default" do
-        Account.services_exposed_to_ui_hash.keys.should == Account.allowable_services.reject { |h,k| !k[:expose_to_ui] }.keys
+        Account.services_exposed_to_ui_hash.keys.should == Account.allowable_services.reject { |h,k| !k[:expose_to_ui] || (k[:expose_to_ui_proc] && !k[:expose_to_ui_proc].call(nil)) }.keys
       end
 
       it "should return services of a type if specified" do
-        Account.services_exposed_to_ui_hash(:setting).keys.should == Account.allowable_services.reject { |h,k| k[:expose_to_ui] != :setting }.keys
+        Account.services_exposed_to_ui_hash(:setting).keys.should == Account.allowable_services.reject { |h,k| k[:expose_to_ui] != :setting || (k[:expose_to_ui_proc] && !k[:expose_to_ui_proc].call(nil)) }.keys
+      end
+
+      it "should filter based on user and account if a proc is specified" do
+        user1 = User.create!
+        user2 = User.create!
+        Account.register_service(:myservice, {
+          name: "My Test Service",
+          description: "Nope",
+          expose_to_ui: :setting,
+          default: false,
+          expose_to_ui_proc: proc { |user, account| user == user2 && account == Account.default },
+        })
+        Account.services_exposed_to_ui_hash(:setting).keys.should_not be_include(:myservice)
+        Account.services_exposed_to_ui_hash(:setting, user1, Account.default).keys.should_not be_include(:myservice)
+        Account.services_exposed_to_ui_hash(:setting, user2, Account.default).keys.should be_include(:myservice)
       end
     end
 
@@ -336,6 +352,29 @@ describe Account do
     end
   end
 
+  context "closest_turnitin_pledge" do
+    it "should work for custom sub, custom root" do
+      root_account = Account.create!(:turnitin_pledge => "root")
+      sub_account = Account.create!(:parent_account => root_account, :turnitin_pledge => "sub")
+      root_account.closest_turnitin_pledge.should == "root"
+      sub_account.closest_turnitin_pledge.should == "sub"
+    end
+
+    it "should work for nil sub, custom root" do
+      root_account = Account.create!(:turnitin_pledge => "root")
+      sub_account = Account.create!(:parent_account => root_account)
+      root_account.closest_turnitin_pledge.should == "root"
+      sub_account.closest_turnitin_pledge.should == "root"
+    end
+
+    it "should work for nil sub, nil root" do
+      root_account = Account.create!
+      sub_account = Account.create!(:parent_account => root_account)
+      root_account.closest_turnitin_pledge.should_not be_empty
+      sub_account.closest_turnitin_pledge.should_not be_empty
+    end
+  end
+
   it "should make a default enrollment term if necessary" do
     a = Account.create!(:name => "nada")
     a.enrollment_terms.size.should == 1
@@ -347,7 +386,10 @@ describe Account do
   end
 
   def account_with_admin_and_restricted_user(account)
-    account.add_account_membership_type('Restricted Admin')
+    role = account.roles.build(:name => 'Restricted Admin')
+    role.base_role_type = AccountUser::BASE_ROLE_NAME
+    role.workflow_state = 'active'
+    role.save!
     admin = User.create
     user = User.create
     account.account_users.create(:user => admin, :membership_type => 'AccountAdmin')
@@ -385,9 +427,12 @@ describe Account do
     end
 
     limited_access = [ :read, :manage, :update, :delete, :read_outcomes ]
-    full_access = RoleOverride.permissions.map { |k, v| k } + limited_access
+    account_enabled_access = [ :view_notifications ]
+    full_access = RoleOverride.permissions.keys + limited_access - account_enabled_access
     index = full_access.index(:manage_courses)
     full_access = full_access[0..index] + [:create_courses] + full_access[index+1..-1]
+    full_root_access = full_access - RoleOverride.permissions.select { |k, v| v[:account_only] == :site_admin }.map(&:first)
+    full_sub_access = full_root_access - RoleOverride.permissions.select { |k, v| v[:account_only] == :root }.map(&:first)
     # site admin has access to everything everywhere
     hash.each do |k, v|
       account = v[:account]
@@ -402,7 +447,7 @@ describe Account do
     hash.each do |k, v|
       next if k == :site_admin
       account = v[:account]
-      account.check_policy(hash[:root][:admin]).should == full_access
+      account.check_policy(hash[:root][:admin]).should == full_root_access
       account.check_policy(hash[:root][:user]).should == limited_access
     end
 
@@ -416,7 +461,7 @@ describe Account do
     hash.each do |k, v|
       next if k == :site_admin || k == :root
       account = v[:account]
-      account.check_policy(hash[:sub][:admin]).should == full_access
+      account.check_policy(hash[:sub][:admin]).should == full_sub_access
       account.check_policy(hash[:sub][:user]).should == limited_access
     end
 
@@ -424,7 +469,9 @@ describe Account do
     some_access = [:read_reports] + limited_access
     hash.each do |k, v|
       account = v[:account]
-      account.role_overrides.create(:permission => 'read_reports', :enrollment_type => 'Restricted Admin', :enabled => true)
+      account.role_overrides.create!(:permission => 'read_reports', :enrollment_type => 'Restricted Admin', :enabled => true)
+      # clear caches
+      v[:account] = Account.find(account)
     end
     RoleOverride.clear_cached_contexts
     hash.each do |k, v|
@@ -439,7 +486,7 @@ describe Account do
     hash.each do |k, v|
       next if k == :site_admin
       account = v[:account]
-      account.check_policy(hash[:root][:admin]).should == full_access
+      account.check_policy(hash[:root][:admin]).should == full_root_access
       account.check_policy(hash[:root][:user]).should == some_access
     end
 
@@ -453,9 +500,18 @@ describe Account do
     hash.each do |k, v|
       next if k == :site_admin || k == :root
       account = v[:account]
-      account.check_policy(hash[:sub][:admin]).should == full_access
+      account.check_policy(hash[:sub][:admin]).should == full_sub_access
       account.check_policy(hash[:sub][:user]).should == some_access
     end
+  end
+
+  it "should allow no_enrollments_can_create_courses correctly" do
+    a = Account.default
+    a.settings = { :no_enrollments_can_create_courses => true }
+    a.save!
+
+    user
+    a.grants_right?(@user, :create_courses).should be_true
   end
 
   it "should correctly return sub-accounts as options" do
@@ -603,7 +659,7 @@ describe Account do
     it "should not include external tools if not configured for course navigation" do
       @account = Account.default.sub_accounts.create!(:name => "sub-account")
       tool = @account.context_external_tools.new(:name => "bob", :consumer_key => "bob", :shared_secret => "bob", :domain => "example.com")
-      tool.settings[:user_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+      tool.user_navigation = {:url => "http://www.example.com", :text => "Example URL"}
       tool.save!
       tool.has_account_navigation.should == false
       tabs = @account.tabs_available(nil)
@@ -645,7 +701,7 @@ describe Account do
     it "should include external tools if configured on the root account" do
       @account = Account.default.sub_accounts.create!(:name => "sub-account")
       tool = @account.context_external_tools.new(:name => "bob", :consumer_key => "bob", :shared_secret => "bob", :domain => "example.com")
-      tool.settings[:account_navigation] = {:url => "http://www.example.com", :text => "Example URL"}
+      tool.account_navigation = {:url => "http://www.example.com", :text => "Example URL"}
       tool.save!
       tool.has_account_navigation.should == true
       tabs = @account.tabs_available(nil)
@@ -707,7 +763,7 @@ describe Account do
   end
 
   context "sharding" do
-    it_should_behave_like "sharding"
+    specs_require_sharding
 
     it "should properly return site admin permissions regardless of active shard" do
       enable_cache do
@@ -839,6 +895,100 @@ describe Account do
         sa = Account.find(sa)
         sa.account_users_for(@user).should == []
       end
+    end
+  end
+
+  describe "available_course_roles_by_name" do
+    before do
+      account_model
+      @roleA = @account.roles.create :name => 'A'
+      @roleA.base_role_type = 'StudentEnrollment'
+      @roleA.save!
+      @roleB = @account.roles.create :name => 'B'
+      @roleB.base_role_type = 'StudentEnrollment'
+      @roleB.save!
+      @sub_account = @account.sub_accounts.create!
+      @roleBsub = @sub_account.roles.create :name => 'B'
+      @roleBsub.base_role_type = 'StudentEnrollment'
+      @roleBsub.save!
+    end
+
+    it "should return roles indexed by name" do
+      @account.available_course_roles_by_name.should == { 'A' => @roleA, 'B' => @roleB }
+    end
+
+    it "should not return inactive roles" do
+      @roleB.deactivate!
+      @account.available_course_roles_by_name.should == { 'A' => @roleA }
+    end
+
+    it "should not return deleted roles" do
+      @roleA.destroy
+      @account.available_course_roles_by_name.should == { 'B' => @roleB }
+    end
+
+    it "should find the most derived version of each role" do
+      @sub_account.available_course_roles_by_name.should == { 'A' => @roleA, 'B' => @roleBsub }
+    end
+
+    it "should find a base role if the derived version is inactive" do
+      @roleBsub.deactivate!
+      @sub_account.available_course_roles_by_name.should == { 'A' => @roleA, 'B' => @roleB }
+    end
+  end
+
+  describe "account_chain" do
+    context "sharding" do
+      specs_require_sharding
+
+      it "should find parent accounts when not on the correct shard" do
+        @shard1.activate do
+          @account1 = Account.create!
+          @account2 = @account1.sub_accounts.create!
+          @account3 = @account2.sub_accounts.create!
+        end
+
+        @account3.account_chain.should == [@account3, @account2, @account1]
+      end
+    end
+  end
+
+  describe "#can_see_admin_tools_tab?" do 
+    it "returns false if no user is present" do 
+      account = Account.create!
+      account.can_see_admin_tools_tab?(nil).should be_false
+    end
+
+    it "returns false if you are a site admin" do
+      admin = account_admin_user(:account => Account.site_admin)
+      Account.site_admin.can_see_admin_tools_tab?(admin).should be_false
+    end
+
+    it "doesn't have permission, it returns false" do 
+      account = Account.create!
+      account.stubs(:grants_right?).returns(false)
+      account_admin_user(:account => account)
+      account.can_see_admin_tools_tab?(@admin).should be_false
+    end
+
+    it "does have permission, it returns true" do 
+      account = Account.create!
+      account.stubs(:grants_right?).returns(true)
+      account_admin_user(:account => account)
+      account.can_see_admin_tools_tab?(@admin).should be_true
+    end
+  end
+
+  describe "#update_account_associations" do
+    it "should update associations for all courses" do
+      account = Account.create!
+      c1 = account.courses.create!
+      c2 = account.courses.create!
+      account.course_account_associations.delete_all
+      account.associated_courses.should == []
+      account.update_account_associations
+      account.reload
+      account.associated_courses.sort_by(&:id).should == [c1, c2]
     end
   end
 end

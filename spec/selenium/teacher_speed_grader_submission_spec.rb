@@ -1,7 +1,16 @@
 require File.expand_path(File.dirname(__FILE__) + '/helpers/speed_grader_common')
 
 describe "speed grader submissions" do
-  it_should_behave_like "speed grader tests"
+  it_should_behave_like "in-process server selenium tests"
+
+  before (:each) do
+    stub_kaltura
+
+    course_with_teacher_logged_in
+    outcome_with_rubric
+    @assignment = @course.assignments.create(:name => 'assignment with rubric', :points_possible => 10)
+    @association = @rubric.associate_with(@assignment, @course, :purpose => 'grading')
+  end
 
   context "as a teacher" do
 
@@ -84,6 +93,21 @@ describe "speed grader submissions" do
     keep_trying_until { f('#speedgrader_iframe') }
 
     f('#submission_late_notice').should be_displayed
+  end
+
+  it "should not display a late message if an assignment has been overridden" do
+    @assignment.update_attribute(:due_at, Time.now - 2.days)
+    override = @assignment.assignment_overrides.build
+    override.due_at = Time.now + 2.days
+    override.due_at_overridden = true
+    override.set = @course.course_sections.first
+    override.save!
+    student_submission
+
+    get "/courses/#{@course.id}/gradebook/speed_grader?assignment_id=#{@assignment.id}"
+    keep_trying_until { f('#speedgrader_iframe') }
+
+    f('#submission_late_notice').should_not be_displayed
   end
 
 
@@ -173,7 +197,7 @@ describe "speed grader submissions" do
     f('#rubric_full .save_rubric_button').click
     wait_for_ajaximations
     f('.toggle_full_rubric').click
-    wait_for_animations
+    wait_for_ajaximations
 
     f("#criterion_#{@rubric.criteria[0][:id]} input.criterion_points").should have_attribute("value", "3")
     f("#criterion_#{@rubric.criteria[1][:id]} input.criterion_points").should have_attribute("value", "5")

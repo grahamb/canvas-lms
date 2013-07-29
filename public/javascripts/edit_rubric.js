@@ -30,7 +30,8 @@ define([
  'jquery.loadingImg' /* loadingImage */,
  'jquery.templateData' /* fillTemplateData, getTemplateData */,
  'vendor/jquery.ba-tinypubsub',
- 'vendor/jquery.scrollTo' /* /\.scrollTo/ */
+ 'vendor/jquery.scrollTo' /* /\.scrollTo/ */,
+ 'compiled/jquery/fixDialogButtons'
 ], function(I18n, changePointsPossibleToMatchRubricDialog, $, _) {
 
   var rubricEditing = {
@@ -71,7 +72,8 @@ define([
       }
 
       $criterion.find('.rating:not(.blank)').each(function(i) {
-        $(this).fillTemplateData(outcome.get('ratings')[i]);
+        var rating = outcome.get('ratings')[i];
+        $(this).fillTemplateData({data: rating});
       });
 
       $criterion.find(".cancel_button").click();
@@ -293,8 +295,12 @@ define([
       var $form = $tr.find("#edit_rubric_form");
       $rubric.append($tr);
       $form.attr('method', 'POST').attr('action', $("#add_rubric_url").attr('href'));
-      var assignment_points = parseFloat($("#full_assignment .points_possible,#rubrics.rubric_dialog .assignment_points_possible").filter(":first").text());
-      $form.find(".rubric_grading").showIf(assignment_points || $("#full_assignment").length > 0);
+      // I believe this should only be visible on the assignment page (not
+      // rubric page or quiz page) but we need to audit uses of the add rubric
+      // dialog before we make it that restrictive
+      var $assignPoints = $("#assignment_show .points_possible,#rubrics.rubric_dialog .assignment_points_possible")
+      var $quizPage = $("#quiz_show,#quiz_edit_wrapper")
+      $form.find(".rubric_grading").showIf($assignPoints.length > 0 && $quizPage.length === 0);
       return $rubric;
     },
     editRubric: function($original_rubric, url) {
@@ -316,7 +322,9 @@ define([
       $form.find(".grading_rubric_checkbox").attr('checked', data.use_for_grading == "true").triggerHandler('change');
       $form.find(".rubric_custom_rating").attr('checked', data.free_form_criterion_comments == "true").triggerHandler('change');
       $form.find(".totalling_rubric_checkbox").attr('checked', data.hide_score_total == "true").triggerHandler('change');
-      $form.find(".save_button").text($rubric.attr('id') == 'rubric_new' ? "Create Rubric" : "Update Rubric");
+      var createText = I18n.t('buttons.create_rubric', "Create Rubric");
+      var updateText = I18n.t('buttons.update_rubric', "Update Rubric");
+      $form.find(".save_button").text($rubric.attr('id') == 'rubric_new' ? createText : updateText);
       $form.attr('method', 'PUT').attr('action', url);
       rubricEditing.sizeRatings();
 
@@ -406,6 +414,7 @@ define([
 
     $("#rubrics")
     .delegate(".long_description_link", 'click', function(event) {
+      console.log('fart');
       event.preventDefault();
       var editing    = $(this).parents(".rubric").hasClass('editing'),
           $criterion = $(this).parents(".criterion"),
@@ -421,8 +430,7 @@ define([
         .dialog({
           title: I18n.t('titles.criterion_long_description', "Criterion Long Description"),
           width: 400
-        })
-        .find("textarea:visible:first").focus().select();
+        }).fixDialogButtons().find("textarea:visible:first").focus().select();
 
     })
     .delegate(".find_rubric_link", 'click', function(event) {
@@ -657,9 +665,9 @@ define([
         if (!$rubric.find(".criterion:not(.blank)").length) return false;
         var data = rubricEditing.rubricData($rubric);
         if (data['rubric_association[use_for_grading]'] == '1') {
-          var assignmentPoints = parseFloat($("#full_assignment .points_possible").text());
+          var assignmentPoints = parseFloat($("#assignment_show .points_possible").text());
           var rubricPoints = parseFloat(data.points_possible);
-          if (assignmentPoints && rubricPoints != assignmentPoints && !forceSubmit) {
+          if (assignmentPoints != null && assignmentPoints != undefined && rubricPoints != assignmentPoints && !forceSubmit) {
             var $confirmDialog = $(changePointsPossibleToMatchRubricDialog({
               assignmentPoints: assignmentPoints,
               rubricPoints: rubricPoints
@@ -712,8 +720,7 @@ define([
         }
         rubricEditing.updateRubric($rubric, rubric);
         if (data.rubric_association && data.rubric_association.use_for_grading && !data.rubric_association.skip_updating_points_possible) {
-          $("#full_assignment .points_possible").text(rubric.points_possible);
-          $("#full_assignment input.points_possible").val(rubric.points_possible);
+          $("#assignment_show .points_possible").text(rubric.points_possible);
         }
         $rubric.find(".rubric_title .links:not(.locked)").show();
       }

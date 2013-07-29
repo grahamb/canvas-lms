@@ -27,12 +27,13 @@ describe CalendarEventsApiController, :type => :integration do
   context 'events' do
     expected_fields = [
       'all_day', 'all_day_date', 'child_events', 'child_events_count',
-      'context_code', 'created_at', 'description', 'end_at', 'hidden', 'id',
-      'location_address', 'location_name', 'parent_event_id', 'start_at',
+      'context_code', 'created_at', 'description', 'end_at', 'hidden', 'html_url',
+      'id', 'location_address', 'location_name', 'parent_event_id', 'start_at',
       'title', 'updated_at', 'url', 'workflow_state'
     ]
     expected_slot_fields = (expected_fields + ['appointment_group_id', 'appointment_group_url', 'available_slots', 'participants_per_appointment', 'reserve_url', 'effective_context_code']).sort
-    expected_reservation_fields = (expected_fields + ['appointment_group_id', 'appointment_group_url', 'effective_context_code'] - ['child_events']).sort
+    expected_reservation_event_fields = (expected_fields + ['appointment_group_id', 'appointment_group_url', 'effective_context_code']).sort
+    expected_reservation_fields = expected_reservation_event_fields - ['child_events']
 
     it 'should return events within the given date range' do
       e1 = @course.calendar_events.create(:title => '1', :start_at => '2012-01-07 12:00:00')
@@ -47,18 +48,79 @@ describe CalendarEventsApiController, :type => :integration do
       json.first.slice('title', 'start_at', 'id').should eql({'id' => e2.id, 'title' => '2', 'start_at' => '2012-01-08T12:00:00Z'})
     end
 
-    it "should default to today's events for the current user if no parameters are specified" do
-      e1 = @user.calendar_events.create!(:title => "yesterday", :start_at => 1.day.ago) { |c| c.context = @user }
-      e2 = @user.calendar_events.create!(:title => "today", :start_at => 0.days.ago) { |c| c.context = @user }
-      e3 = @user.calendar_events.create!(:title => "tomorrow", :start_at => 1.days.from_now) { |c| c.context = @user }
+    it 'orders result set by start_at' do
+      e2 = @course.calendar_events.create(:title => 'second', :start_at => '2012-01-08 12:00:00')
+      e1 = @course.calendar_events.create(:title => 'first', :start_at => '2012-01-07 12:00:00')
+      e3 = @course.calendar_events.create(:title => 'third', :start_at => '2012-01-19 12:00:00')
 
-      json = api_call(:get, "/api/v1/calendar_events", {
-        :controller => 'calendar_events_api', :action => 'index', :format => 'json'
-        })
-
-      json.size.should eql 1
+      json = api_call(:get, "/api/v1/calendar_events?start_date=2012-01-07&end_date=2012-01-19&context_codes[]=course_#{@course.id}", {
+                        :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                        :context_codes => ["course_#{@course.id}"], :start_date => '2012-01-07', :end_date => '2012-01-19'})
+      json.size.should eql 3
       json.first.keys.sort.should eql expected_fields
-      json.first.slice('id', 'title').should eql({'id' => e2.id, 'title' => 'today'})
+      json.map { |event| event['title'] }.should == %w[first second third]
+    end
+
+    it "should default to today's events for the current user if no parameters are specified" do
+      Timecop.freeze('2012-01-29 12:00:00 UTC') do
+        e1 = @user.calendar_events.create!(:title => "yesterday", :start_at => 1.day.ago) { |c| c.context = @user }
+        e2 = @user.calendar_events.create!(:title => "today", :start_at => 0.days.ago) { |c| c.context = @user }
+        e3 = @user.calendar_events.create!(:title => "tomorrow", :start_at => 1.days.from_now) { |c| c.context = @user }
+
+        json = api_call(:get, "/api/v1/calendar_events", {
+          :controller => 'calendar_events_api', :action => 'index', :format => 'json'
+          })
+
+        json.size.should eql 1
+        json.first.keys.sort.should eql expected_fields
+        json.first.slice('id', 'title').should eql({'id' => e2.id, 'title' => 'today'})
+      end
+    end
+
+    context "timezones" do
+      it "shows today's events in user's timezone, even if UTC has crossed into tomorrow" do
+        akst = ActiveSupport::TimeZone.new('Alaska')
+
+        e1 = @user.calendar_events.create!(:title => "yesterday in AKST", :start_at => akst.parse('2012-01-28 21:00:00')) { |c| c.context = @user }
+        e2 = @user.calendar_events.create!(:title => "today in AKST", :start_at =>  akst.parse('2012-01-29 21:00:00')) { |c| c.context = @user }
+        e3 = @user.calendar_events.create!(:title => "tomorrow in AKST", :start_at => akst.parse('2012-01-30 21:00:00')) { |c| c.context = @user }
+
+        @user.update_attributes! :time_zone => "Alaska"
+
+        Timecop.freeze(akst.parse('2012-01-29 22:00:00')) do
+          json = api_call(:get, "/api/v1/calendar_events", {
+            :controller => 'calendar_events_api', :action => 'index', :format => 'json'
+            })
+
+          json.size.should eql 1
+          json.first.keys.sort.should eql expected_fields
+          json.first.slice('id', 'title').should eql({'id' => e2.id, 'title' => 'today in AKST'})
+        end
+      end
+
+      it "interprets user-specified date range in the user's time zone" do
+        akst = ActiveSupport::TimeZone.new('Alaska')
+
+        e1 = @user.calendar_events.create!(:title => "yesterday in AKST", :start_at => akst.parse('2012-01-28 21:00:00')) { |c| c.context = @user }
+        e2 = @user.calendar_events.create!(:title => "today in AKST", :start_at =>  akst.parse('2012-01-29 21:00:00')) { |c| c.context = @user }
+        e3 = @user.calendar_events.create!(:title => "tomorrow in AKST", :start_at => akst.parse('2012-01-30 21:00:00')) { |c| c.context = @user }
+
+        @user.update_attributes! :time_zone => "Alaska"
+
+        Timecop.freeze(akst.parse('2012-01-29 22:00:00')) do
+          json = api_call(:get, "/api/v1/calendar_events", {
+            :controller => 'calendar_events_api', :action => 'index', :format => 'json'
+            })
+
+          json = api_call(:get, "/api/v1/calendar_events?start_date=2012-01-28&end_date=2012-01-29&context_codes[]=user_#{@user.id}", {
+                            :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                            :context_codes => ["user_#{@user.id}"], :start_date => '2012-01-28', :end_date => '2012-01-29'})
+          json.size.should eql 2
+          json[0].keys.sort.should eql expected_fields
+          json[0].slice('id', 'title').should eql({'id' => e1.id, 'title' => 'yesterday in AKST'})
+          json[1].slice('id', 'title').should eql({'id' => e2.id, 'title' => 'today in AKST'})
+        end
+      end
     end
 
     it 'should paginate events' do
@@ -97,17 +159,18 @@ describe CalendarEventsApiController, :type => :integration do
       json.size.should eql 9 # first context has no events
     end
 
-    it 'should ignore contexts the user cannot access' do
+    it 'should fail with unauthorized if provided a context the user cannot access' do
       contexts = [@course.asset_string]
-      contexts.concat 5.times.map { |i|
-        course()
-        @course.calendar_events.create(:title => "#{i}", :start_at => '2012-01-08 12:00:00')
-        @course.asset_string
-      }
+
+      # second context the user cannot access
+      course()
+      @course.calendar_events.create(:title => "unauthorized_course", :start_at => '2012-01-08 12:00:00')
+      contexts.push(@course.asset_string)
+
       json = api_call(:get, "/api/v1/calendar_events?start_date=2012-01-08&end_date=2012-01-07&per_page=25&context_codes[]=" + contexts.join("&context_codes[]="), {
                         :controller => 'calendar_events_api', :action => 'index', :format => 'json',
-                        :context_codes => contexts, :start_date => '2012-01-08', :end_date => '2012-01-07', :per_page => '25'})
-      json.size.should eql 0 # first context has no events
+                        :context_codes => contexts, :start_date => '2012-01-08', :end_date => '2012-01-07', :per_page => '25'},
+                        {}, {}, {:expected_status => 401})
     end
 
     it "should allow specifying an unenrolled but accessible context" do
@@ -122,6 +185,35 @@ describe CalendarEventsApiController, :type => :integration do
       json.first['title'].should == "from unrelated one"
     end
 
+    def public_course_query(options = {})
+      yield @course if block_given?
+      @course.save!
+
+      api_call(:get, "/api/v1/calendar_events?start_date=2012-01-01&end_date=2012-01-31&context_codes[]=course_#{@course.id}", {
+                :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                :context_codes => ["course_#{@course.id}"], :start_date => '2012-01-01', :end_date => '2012-01-31'},
+                options[:body_params] || {}, options[:headers] || {}, options[:opts] || {})
+    end
+
+    it "should not allow anonymous users to access a non-public context" do
+      course(:active_all => true)
+      public_course_query(:opts => {:expected_status => 401})
+    end
+
+    it "should allow anonymous users to access public context" do
+      course(:active_all => true)
+      public_course_query() do |c|
+        c.is_public = true
+      end
+    end
+
+    it "should allow anonymous users to access a public syllabus" do
+      course(:active_all => true)
+      public_course_query() do |c|
+        c.public_syllabus = true
+      end
+    end
+
     it 'should return undated events' do
       @course.calendar_events.create(:title => 'undated')
       @course.calendar_events.create(:title => "dated", :start_at => '2012-01-08 12:00:00')
@@ -130,6 +222,37 @@ describe CalendarEventsApiController, :type => :integration do
                         :context_codes => ["course_#{@course.id}"], :undated => '1'})
       json.size.should eql 1
       json.first['start_at'].should be_nil
+    end
+
+    context 'all events' do
+      before do
+        @course.calendar_events.create(:title => 'undated')
+        @course.calendar_events.create(:title => 'dated', :start_at => '2012-01-08 12:00:00')
+      end
+
+      it 'should return all events' do
+        json = api_call(:get, "/api/v1/calendar_events?all_events=1&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1'})
+        json.size.should eql 2
+      end
+
+      it 'should return all events, ignoring the undated flag' do
+        json = api_call(:get, "/api/v1/calendar_events?all_events=1&undated=1&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1', :undated => '1'})
+        json.size.should eql 2
+      end
+
+      it 'should return all events, ignoring the start_date and end_date' do
+        json = api_call(:get, "/api/v1/calendar_events?all_events=1&start_date=2012-02-01&end_date=2012-02-01&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1', :start_date => '2012-02-01', :end_date => '2012-02-01'})
+        json.size.should eql 2
+      end
     end
 
     context 'appointments' do
@@ -160,6 +283,7 @@ describe CalendarEventsApiController, :type => :integration do
                           :controller => 'calendar_events_api', :action => 'index', :format => 'json',
                           :context_codes => [@course.asset_string], :start_date => '2012-01-01', :end_date => '2012-01-31'})
         json.size.should eql 2
+        json.sort! {|e1, e2| e1['id'] <=> e2['id']}
 
         e1json = json.first
         e1json.keys.sort.should eql(expected_slot_fields)
@@ -204,8 +328,11 @@ describe CalendarEventsApiController, :type => :integration do
                           :controller => 'calendar_events_api', :action => 'index', :format => 'json',
                           :context_codes => [group1.asset_string, group2.asset_string], :start_date => '2012-01-01', :end_date => '2012-01-31'})
         json.size.should eql 2
+        json.sort! {|e1, e2| e1['id'] <=> e2['id']}
+
         ejson = json.first
-        ejson.keys.sort.should eql((expected_slot_fields + ['reserved'] - ['child_events']).sort) # not reserved, so no child events can be seen
+        ejson.keys.sort.should eql((expected_slot_fields + ['reserved']).sort)
+        ejson['child_events'].should == [] # not reserved, so no child events can be seen
         ejson['reserve_url'].should match %r{calendar_events/#{event1.id}/reservations/#{@me.id}}
         ejson['reserved'].should be_false
         ejson['available_slots'].should eql 1
@@ -303,14 +430,14 @@ describe CalendarEventsApiController, :type => :integration do
                           :context_codes => [@course.asset_string], :start_date => '2012-01-01', :end_date => '2012-01-31'})
         # the group appointment won't show on the course calendar
         json.size.should eql 1
-        json.first.keys.sort.should eql(expected_reservation_fields)
+        json.first.keys.sort.should eql(expected_reservation_event_fields)
         json.first['id'].should eql my_personal_appointment.id
 
         json = api_call(:get, "/api/v1/calendar_events?start_date=2012-01-01&end_date=2012-01-31&context_codes[]=#{mygroup.asset_string}", {
                           :controller => 'calendar_events_api', :action => 'index', :format => 'json',
                           :context_codes => [mygroup.asset_string], :start_date => '2012-01-01', :end_date => '2012-01-31'})
         json.size.should eql 1
-        json.first.keys.sort.should eql(expected_reservation_fields - ['effective_context_code'])
+        json.first.keys.sort.should eql(expected_reservation_event_fields - ['effective_context_code'])
         json.first['id'].should eql my_group_appointment.id
 
         # if we go look at those appointment slots, they now show as reserved
@@ -318,6 +445,7 @@ describe CalendarEventsApiController, :type => :integration do
                           :controller => 'calendar_events_api', :action => 'index', :format => 'json',
                           :context_codes => [ag1.asset_string, ag2.asset_string], :start_date => '2012-01-01', :end_date => '2012-01-31'})
         json.size.should eql 2
+        json.sort! {|e1, e2| e1['id'] <=> e2['id']}
         json.each do |e|
           e.keys.sort.should eql((expected_slot_fields + ['reserved']).sort)
           e['reserved'].should be_true
@@ -327,6 +455,7 @@ describe CalendarEventsApiController, :type => :integration do
         end
         json.first['child_events'].first.keys.sort.should eql((expected_reservation_fields + ['own_reservation', 'user']).sort)
         json.last['child_events'].first.keys.sort.should eql((expected_reservation_fields + ['own_reservation', 'group'] - ['effective_context_code']).sort)
+
       end
 
       context "reservations" do
@@ -366,12 +495,12 @@ describe CalendarEventsApiController, :type => :integration do
           prepare(true)
           json = api_call(:post, "/api/v1/calendar_events/#{@event1.id}/reservations", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event1.id.to_s})
-          json.keys.sort.should eql(expected_reservation_fields)
+          json.keys.sort.should eql(expected_reservation_event_fields)
           json['appointment_group_id'].should eql(@ag1.id)
 
           json = api_call(:post, "/api/v1/calendar_events/#{@event3.id}/reservations", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event3.id.to_s})
-          json.keys.sort.should eql(expected_reservation_fields - ['effective_context_code']) # group one is on the group, no effective context
+          json.keys.sort.should eql(expected_reservation_event_fields - ['effective_context_code']) # group one is on the group, no effective context
           json['appointment_group_id'].should eql(@ag2.id)
         end
 
@@ -401,13 +530,13 @@ describe CalendarEventsApiController, :type => :integration do
           prepare(true)
           json = api_call(:post, "/api/v1/calendar_events/#{@event1.id}/reservations", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event1.id.to_s})
-          json.keys.sort.should eql(expected_reservation_fields)
+          json.keys.sort.should eql(expected_reservation_event_fields)
           json['appointment_group_id'].should eql(@ag1.id)
           @ag1.reservations_for(@me).map(&:parent_calendar_event_id).should eql [@event1.id]
 
           json = api_call(:post, "/api/v1/calendar_events/#{@event2.id}/reservations?cancel_existing=1", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event2.id.to_s, :cancel_existing => '1'})
-          json.keys.sort.should eql(expected_reservation_fields)
+          json.keys.sort.should eql(expected_reservation_event_fields)
           json['appointment_group_id'].should eql(@ag1.id)
           @ag1.reservations_for(@me).map(&:parent_calendar_event_id).should eql [@event2.id]
         end
@@ -427,12 +556,12 @@ describe CalendarEventsApiController, :type => :integration do
           prepare
           json = api_call(:post, "/api/v1/calendar_events/#{@event1.id}/reservations/#{@other_guy.id}", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event1.id.to_s, :participant_id => @other_guy.id.to_s})
-          json.keys.sort.should eql(expected_reservation_fields)
+          json.keys.sort.should eql(expected_reservation_event_fields)
           json['appointment_group_id'].should eql(@ag1.id)
 
           json = api_call(:post, "/api/v1/calendar_events/#{@event3.id}/reservations/#{@group.id}", {
                             :controller => 'calendar_events_api', :action => 'reserve', :format => 'json', :id => @event3.id.to_s, :participant_id => @group.id.to_s})
-          json.keys.sort.should eql(expected_reservation_fields - ['effective_context_code'])
+          json.keys.sort.should eql(expected_reservation_event_fields - ['effective_context_code'])
           json['appointment_group_id'].should eql(@ag2.id)
         end
 
@@ -497,6 +626,17 @@ describe CalendarEventsApiController, :type => :integration do
       json['title'].should eql 'ohai'
     end
 
+    it 'should process html content in description on create' do
+      should_process_incoming_user_content(@course) do |content|
+        json = api_call(:post, "/api/v1/calendar_events",
+                        { :controller => 'calendar_events_api', :action => 'create', :format => 'json' },
+                        { :calendar_event => {:context_code => @course.asset_string, :title => "ohai", :description => content} })
+
+        event = CalendarEvent.find(json['id'])
+        event.description
+      end
+    end
+
     it 'should update an event' do
       event = @course.calendar_events.create(:title => 'event', :start_at => '2012-01-08 12:00:00')
 
@@ -506,6 +646,19 @@ describe CalendarEventsApiController, :type => :integration do
       json.keys.sort.should eql expected_fields
       json['title'].should eql 'ohai'
       json['start_at'].should eql '2012-01-09T12:00:00Z'
+    end
+
+    it 'should process html content in description on update' do
+      event = @course.calendar_events.create(:title => 'event', :start_at => '2012-01-08 12:00:00')
+
+      should_process_incoming_user_content(@course) do |content|
+        json = api_call(:put, "/api/v1/calendar_events/#{event.id}",
+          { :controller => 'calendar_events_api', :action => 'update', :id => event.id.to_s, :format => 'json' },
+          { :calendar_event => {:start_at => '2012-01-09 12:00:00', :description => content} })
+
+        event.reload
+        event.description
+      end
     end
 
     it 'should delete an event' do
@@ -534,9 +687,19 @@ describe CalendarEventsApiController, :type => :integration do
                         :controller => 'courses', :action => 'show', :format => 'json', :id => @course.id.to_s)
         get json['calendar']['ics']
         response.should be_success
-        cal = Icalendar.parse(response.body)[0]
+        cal = Icalendar.parse(response.body.dup)[0]
         cal.events[0].x_alt_desc
       end
+    end
+
+    it "should omit assignment description in ics" do
+      HostUrl.stubs(:default_host).returns('www.example.com')
+      assignment_model(description: "secret stuff here")
+      get "/feeds/calendars/#{@course.feed_code}.ics"
+      response.should be_success
+      cal = Icalendar.parse(response.body.dup)[0]
+      cal.events[0].description.should == nil
+      cal.events[0].x_alt_desc.should == nil
     end
 
     context "child_events" do
@@ -580,8 +743,21 @@ describe CalendarEventsApiController, :type => :integration do
         json.keys.sort.should eql expected_fields
         json['title'].should eql 'ohai'
         json['child_events'].should be_empty
-        json['start_at'].should be_nil
-        json['end_at'].should be_nil
+        json['start_at'].should == '2012-01-01T12:00:00Z'
+        json['end_at'].should == '2012-01-01T13:00:00Z'
+        json['hidden'].should be_false
+      end
+
+      it "should add the section name to a child event's title"  do
+        event = @course.calendar_events.build(:title => 'ohai', :child_event_data => {"0" => {:start_at => "2012-01-01 12:00:00", :end_at => "2012-01-01 13:00:00", :context_code => @course.default_section.asset_string}})
+        event.updating_user = @user
+        event.save!
+  
+        child_event_id = event.child_event_ids.first
+        json = api_call(:get, "/api/v1/calendar_events/#{child_event_id}",
+                        { :controller => 'calendar_events_api', :action => 'show', :id => child_event_id.to_s, :format => 'json' })
+        json.keys.sort.should eql((expected_fields + ['effective_context_code']).sort)
+        json['title'].should eql "ohai (#{@course.default_section.name})"
         json['hidden'].should be_false
       end
     end
@@ -590,8 +766,8 @@ describe CalendarEventsApiController, :type => :integration do
   context 'assignments' do
     expected_fields = [
       'all_day', 'all_day_date', 'assignment', 'context_code', 'created_at',
-      'description', 'end_at', 'id', 'start_at', 'title', 'updated_at', 'url',
-      'workflow_state'
+      'description', 'end_at', 'html_url', 'id', 'start_at', 'title', 'updated_at',
+      'url', 'workflow_state'
     ]
 
     it 'should return assignments within the given date range' do
@@ -605,6 +781,19 @@ describe CalendarEventsApiController, :type => :integration do
       json.size.should eql 1
       json.first.keys.sort.should eql expected_fields
       json.first.slice('title', 'start_at', 'id').should eql({'id' => "assignment_#{e2.id}", 'title' => '2', 'start_at' => '2012-01-08T12:00:00Z'})
+    end
+
+    it 'orders result set by base due_at' do
+      e2 = @course.assignments.create(:title => '2', :due_at => '2012-01-08 12:00:00')
+      e1 = @course.assignments.create(:title => '1', :due_at => '2012-01-07 12:00:00')
+      e3 = @course.assignments.create(:title => '3', :due_at => '2012-01-19 12:00:00')
+
+      json = api_call(:get, "/api/v1/calendar_events?type=assignment&start_date=2012-01-07&end_date=2012-01-19&context_codes[]=course_#{@course.id}", {
+          :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+          :context_codes => ["course_#{@course.id}"], :start_date => '2012-01-07', :end_date => '2012-01-19'})
+      json.size.should eql 3
+      json.first.keys.sort.should eql expected_fields
+      json.map { |event| event['title'] }.should == %w[1 2 3]
     end
 
     it 'should paginate assignments' do
@@ -653,6 +842,37 @@ describe CalendarEventsApiController, :type => :integration do
       json.first['due_at'].should be_nil
     end
 
+    context 'all assignments' do
+      before do
+        @course.assignments.create(:title => 'undated')
+        @course.assignments.create(:title => 'dated', :due_at => '2012-01-08 12:00:00')
+      end
+
+      it 'should return all assignments' do
+        json = api_call(:get, "/api/v1/calendar_events?type=assignment&all_events=1&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1'})
+        json.size.should eql 2
+      end
+
+      it 'should return all assignments, ignoring the undated flag' do
+        json = api_call(:get, "/api/v1/calendar_events?type=assignment&all_events=1&undated=1&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1', :undated => '1'})
+        json.size.should eql 2
+      end
+
+      it 'should return all assignments, ignoring the start_date and end_date' do
+        json = api_call(:get, "/api/v1/calendar_events?type=assignment&all_events=1&start_date=2012-02-01&end_date=2012-02-01&context_codes[]=course_#{@course.id}", {
+                          :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+                          :context_codes => ["course_#{@course.id}"],
+                          :all_events => '1', :start_date => '2012-02-01', :end_date => '2012-02-01'})
+        json.size.should eql 2
+      end
+    end
+
     it 'should get a single assignment' do
       assignment = @course.assignments.create(:title => 'event')
       json = api_call(:get, "/api/v1/calendar_events/assignment_#{assignment.id}", {
@@ -688,7 +908,7 @@ describe CalendarEventsApiController, :type => :integration do
     context 'date overrides' do
       before :each do
         @default_assignment = @course.assignments.create(:title => 'overridden', :due_at => '2012-01-12 12:00:00')  # out of range
-        @default_assignment.workflow_state = 'available'
+        @default_assignment.workflow_state = 'published'
         @default_assignment.save!
       end
 
@@ -701,6 +921,49 @@ describe CalendarEventsApiController, :type => :integration do
         context 'when no sections' do
           before :each do
             @course.enroll_student(@student, :enrollment_state => 'active')
+          end
+
+          it 'should return an all-day override' do
+            # make the assignment non-all day
+            @default_assignment.due_at = DateTime.parse('2012-01-12 04:42:00')
+            @default_assignment.save!
+            @default_assignment.all_day.should be_false
+            @default_assignment.all_day_date.should == DateTime.parse('2012-01-12 04:42:00').to_date
+
+            assignment_override_model(:assignment => @default_assignment, :set => @course.default_section, 
+              :due_at => DateTime.parse('2012-01-21 23:59:00'))
+            @override.all_day.should be_true
+            @override.all_day_date.should == DateTime.parse('2012-01-21 23:59:00').to_date
+
+            json = api_call(:get, "/api/v1/calendar_events?type=assignment&start_date=2012-01-01&end_date=2012-01-31&per_page=25&context_codes[]=course_#{@course.id}", {
+                :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+                :context_codes => ["course_#{@course.id}"], :start_date => '2012-01-01', :end_date => '2012-01-31', :per_page => '25'})
+            json.size.should == 1
+            json.first['id'].should == "assignment_#{@default_assignment.id}"
+
+            json.first['all_day'].should be_true
+            json.first['all_day_date'].should == '2012-01-21'
+          end
+
+          it 'should return a non-all-day override' do
+            @default_assignment.due_at = DateTime.parse('2012-01-12 23:59:00')
+            @default_assignment.save!
+            @default_assignment.all_day.should be_true
+            @default_assignment.all_day_date.should == DateTime.parse('2012-01-12 23:59:00').to_date
+
+            assignment_override_model(:assignment => @default_assignment, :set => @course.default_section, 
+              :due_at => DateTime.parse('2012-01-21 04:42:00'))
+            @override.all_day.should be_false
+            @override.all_day_date.should == DateTime.parse('2012-01-21 04:42:00').to_date
+
+            json = api_call(:get, "/api/v1/calendar_events?type=assignment&start_date=2012-01-01&end_date=2012-01-31&per_page=25&context_codes[]=course_#{@course.id}", {
+                :controller => 'calendar_events_api', :action => 'index', :format => 'json', :type => 'assignment',
+                :context_codes => ["course_#{@course.id}"], :start_date => '2012-01-01', :end_date => '2012-01-31', :per_page => '25'})
+            json.size.should == 1
+            json.first['id'].should == "assignment_#{@default_assignment.id}"
+
+            json.first['all_day'].should be_false
+            json.first['all_day_date'].should == '2012-01-21'
           end
 
           it 'should return a non-overridden assignment' do
@@ -1195,4 +1458,63 @@ describe CalendarEventsApiController, :type => :integration do
       end
     end
   end
+
+  context "calendar feed" do
+    before :each do
+      now = Time.now
+      @student = user(:active_all => true, :active_state => 'active')
+      @course.enroll_student(@student, :enrollment_state => 'active')
+      @student2 = user(:active_all => true, :active_state => 'active')
+      @course.enroll_student(@student2, :enrollment_state => 'active')
+
+
+      @event = @course.calendar_events.create(:title => 'course event', :start_at => now + 1.day)
+      @assignment = @course.assignments.create(:title => 'original assignment', :due_at => now + 2.days)
+      @override = assignment_override_model(
+        :assignment => @assignment, :due_at => @assignment.due_at + 3.days, :set => @course.default_section)
+
+      @appointment_group = AppointmentGroup.create!(
+        :title => "appointment group", :participants_per_appointment => 4, 
+        :new_appointments => [
+          [now + 3.days, now + 3.days + 1.hour],
+          [now + 3.days + 1.hour, now + 3.days + 2.hours],
+          [now + 3.days + 2.hours, now + 3.days + 3.hours]],
+        :contexts => [@course])
+
+      @appointment_event = @appointment_group.appointments[0]
+      @appointment = @appointment_event.reserve_for(@student, @student)
+
+      @appointment_event2 = @appointment_group.appointments[1]
+      @appointment2 = @appointment_event2.reserve_for(@student2, @student2)
+    end
+
+    it "should have events for the teacher" do
+      raw_api_call(:get, "/feeds/calendars/#{@teacher.feed_code}.ics", {
+        :controller => 'calendar_events_api', :action => 'public_feed', :format => 'ics', :feed_code => @teacher.feed_code})
+      response.should be_success
+
+      response.body.scan(/UID:\s*event-([^\n]*)/).flatten.map(&:strip).sort.should eql [
+        "assignment-#{@assignment.id}", "assignment-override-#{@override.id}", "calendar-event-#{@event.id}",
+        "calendar-event-#{@appointment_event.id}", "calendar-event-#{@appointment_event2.id}"].sort
+    end
+
+    it "should have events for the student" do
+      raw_api_call(:get, "/feeds/calendars/#{@student.feed_code}.ics", {
+        :controller => 'calendar_events_api', :action => 'public_feed', :format => 'ics', :feed_code => @student.feed_code})
+      response.should be_success
+
+      response.body.scan(/UID:\s*event-([^\n]*)/).flatten.map(&:strip).sort.should eql [
+        "assignment-override-#{@override.id}", "calendar-event-#{@event.id}", "calendar-event-#{@appointment.id}"].sort
+
+      # make sure the assignment actually has the override date
+      expected_override_date_output = @override.due_at.utc.iso8601.gsub(/[-:]/, '').gsub(/\d\dZ$/, '00Z')
+      response.body.match(/DTSTART:\s*#{expected_override_date_output}/).should_not be_nil
+    end
+
+    it "should render unauthorized feed for bad code" do
+      get "/feeds/calendars/user_garbage.ics"
+      response.should render_template('shared/unauthorized_feed')
+    end
+  end
+
 end

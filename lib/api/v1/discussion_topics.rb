@@ -20,8 +20,12 @@ module Api::V1::DiscussionTopics
   include Api::V1::Json
   include Api::V1::User
   include Api::V1::Attachment
+  include Api::V1::Locked
 
   def discussion_topics_api_json(topics, context, user, session)
+    # remove the topics which are not visible for the current user from the returned list of topics
+    topics.reject! { |t| !t.visible_for?(user, :check_policies => true) }
+
     topics.map do |topic|
       discussion_topic_api_json(topic, context, user, session)
     end
@@ -39,18 +43,21 @@ module Api::V1::DiscussionTopics
       url = feeds_topic_format_path(topic.id, code, :rss)
     end
 
-    children = topic.child_topics.scoped(:select => 'id').map(&:id)
+    children = topic.child_topics.pluck(:id)
 
     api_json(topic, user, session, {
-                  :only => %w(id title assignment_id delayed_post_at last_reply_at posted_at root_topic_id podcast_has_student_posts),
+                  :only => %w(id title assignment_id delayed_post_at lock_at last_reply_at posted_at root_topic_id podcast_has_student_posts),
                   :methods => [:user_name, :discussion_subentry_count], }, [:attach, :update, :delete]
     ).tap do |json|
       json.merge! :message => api_user_content(topic.message, context),
                   :discussion_type => topic.discussion_type,
                   :require_initial_post => topic.require_initial_post?,
                   :podcast_url => url,
+                  :pinned => !!topic.pinned,
+                  :position => topic.position,
                   :read_state => topic.read_state(user),
                   :unread_count => topic.unread_count(user),
+                  :subscribed => topic.subscribed?(user),
                   :topic_children => children,
                   :attachments => attachments,
                   :locked => topic.locked?,
@@ -60,6 +67,7 @@ module Api::V1::DiscussionTopics
                                             :context_discussion_topic_url,
                                             topic,
                                             :include_host => true)
+      locked_json(json, topic, user, session)
       json[:url] = json[:html_url] # deprecated
       if include_assignment && topic.assignment
         extend Api::V1::Assignment
@@ -79,13 +87,13 @@ module Api::V1::DiscussionTopics
   def discussion_entry_api_json(entries, context, user, session, includes = [:user_name, :subentries])
     entries.map do |entry|
       if entry.deleted?
-        json = api_json(entry, user, session, :only => %w(id created_at updated_at parent_id))
+        json = api_json(entry, user, session, :only => %w(id created_at updated_at parent_id editor_id))
         json[:deleted] = true
       else
         json = api_json(entry, user, session,
                         :only => %w(id user_id created_at updated_at parent_id))
         json[:user_name] = entry.user_name if includes.include?(:user_name)
-        json[:editor_id] = entry.editor_id if entry.editor_id && entry.editor_id != entry.user_id
+        json[:editor_id] = entry.editor_id if entry.editor_id
         json[:message] = api_user_content(entry.message, context, user)
         if entry.attachment
           json[:attachment] = attachment_json(entry.attachment, user, :host => HostUrl.context_host(context))
@@ -93,10 +101,15 @@ module Api::V1::DiscussionTopics
           json[:attachments] = [json[:attachment]]
         end
       end
-      json[:read_state] = entry.read_state(user) if user
+
+      if user
+        participant = entry.find_existing_participant(user)
+        json[:read_state] = participant.workflow_state
+        json[:forced_read_state] = participant.forced_read_state?
+      end
 
       if includes.include?(:subentries) && entry.root_entry_id.nil?
-        replies = entry.flattened_discussion_subentries.active.newest_first.find(:all, :limit => 11).to_a
+        replies = entry.flattened_discussion_subentries.active.newest_first.limit(11).all
         unless replies.empty?
           json[:recent_replies] = discussion_entry_api_json(replies.first(10), context, user, session, includes)
           json[:has_more_replies] = replies.size > 10

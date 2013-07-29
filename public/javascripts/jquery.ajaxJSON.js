@@ -22,9 +22,9 @@ define([
   'jquery' /* $ */
 ], function(INST, $) {
 
-  $.originalGetJSON = $.getJSON;
+  var _getJSON = $.getJSON;
   $.getJSON = function(url, data, callback) {
-    var xhr = $.originalGetJSON(url, data, callback);
+    var xhr = _getJSON.apply($, arguments);
     $.ajaxJSON.storeRequest(xhr, url, 'GET', data);
     return xhr;
   };
@@ -69,7 +69,8 @@ define([
       url: url,
       dataType: "json",
       type: submit_type,
-      success: function(data) {
+      success: function(data, textStatus, xhr) {
+        updateCSRFToken(xhr);
         data = data || {};
         var page_view_id = null;
         if(xhr && xhr.getResponseHeader && (page_view_id = xhr.getResponseHeader("X-Canvas-Page-View-Id"))) {
@@ -88,8 +89,11 @@ define([
           success(data, xhr);
         }
       },
-      error: function() {
+      error: function(xhr) {
+        updateCSRFToken(xhr);
         ajaxError.apply(this, arguments);
+      },
+      complete: function(xhr) {
       },
       data: data
     };
@@ -120,6 +124,17 @@ define([
     }
     return null;
   };
+
+  function updateCSRFToken(xhr) {
+    // in case the server has generated a new one, e.g. session reset on
+    // login actions
+    var token = xhr.getResponseHeader('X-CSRF-Token');
+    if (token) {
+      ENV.AUTHENTICITY_TOKEN = token;
+      // TODO: stop using me
+      $("#ajax_authenticity_token").text(token);
+    }
+  }
 
   // Defines a default error for all ajax requests.  Will always be called
   // in the development environment, and as a last-ditch error catching

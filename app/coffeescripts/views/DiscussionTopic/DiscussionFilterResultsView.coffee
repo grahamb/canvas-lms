@@ -22,20 +22,24 @@ define [
     attach: ->
       @model.on 'change', @renderOrTeardownResults
 
-    createEntryView: ->
-      new FilterEntryView
-        model: entry
-        treeView: EntryCollectionView
-        descendants: @options.descendants
-        children: @collection.options.perPage
-        showMoreDescendants: @options.showMoreDescendants
-        threaded: @options.threaded
+    setAllReadState: (newReadState) ->
+      if @collection?
+        @collection.fullCollection.each (entry) ->
+          entry.set 'read_state', newReadState
 
     resetCollection: (models) =>
       collection = new EntryCollection models, perPage: 10
       @collection = collection.getPageAsCollection 0
       @collection.on 'add', @add
       @render()
+      # sync read_state changes between @collection and @allData materialized view
+      @collection.on 'change:read_state', (entry, read_state) =>
+        @trigger 'readStateChanged', entry.id, read_state
+        # check if rendered entry exists to visually update
+        $el = $("#entry-#{entry.id}")
+        if $el.length
+          entry = $el.data('view').model
+          entry.set 'read_state', read_state if entry
 
     add: (entry) =>
       view = new FilterEntryView model: entry
@@ -47,26 +51,34 @@ define [
         , 1
       @list.append view.el
 
+    toggleRead: (e) ->
+      e.preventDefault()
+      if @model.get('read_state') is 'read'
+        @model.markAsUnread()
+      else
+        @model.markAsRead()
+
     clearModel: =>
-      @model.set
-        unread: false
-        query: null
+      @model.reset()
 
     render: =>
       super if @collection?
+      @trigger 'render'
       @$el.removeClass 'hidden'
 
     renderOrTeardownResults: =>
       if @model.hasFilter()
         results = (entry for id, entry of @allData.flattened)
         for filter, value of @model.toJSON()
-          results = @["#{filter}Filter"](value, results)
+          filterFn = @["#{filter}Filter"]
+          results = filterFn(value, results) if filterFn
         if results.length
           @resetCollection results
         else
           @renderNoResults()
-      else
-        @$el.addClass 'hidden' unless @model.hasFilter()
+      else if not @model.hasFilter()
+        @$el.addClass 'hidden'
+        @trigger 'hide'
 
     renderNoResults: ->
       @render()

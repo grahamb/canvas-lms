@@ -36,22 +36,6 @@ describe SubmissionComment do
     SubmissionComment.create!(@valid_attributes)
   end
 
-  it "should not dispatch notification on create if assignment is not published" do
-    assignment_model
-    @assignment.workflow_state = 'available'
-    @assignment.save
-    @course.offer
-    te = @course.enroll_teacher(user)
-    se = @course.enroll_student(user)
-    @assignment.reload
-    @submission = @assignment.submit_homework(se.user, :body => 'some message')
-    @submission.created_at = Time.now - 60
-    @submission.save
-    Notification.create(:name => 'Submission Comment')
-    @comment = @submission.add_comment(:author => te.user, :comment => "some comment")
-    @comment.messages_sent.should_not be_include('Submission Comment')
-  end
-  
   it "should dispatch notifications on create regardless of how long ago the submission was created" do
     assignment_model
     @assignment.workflow_state = 'published'
@@ -150,12 +134,10 @@ This text has a http://www.google.com link in it...
     @comment = @submission.add_comment(:author => se.user, :comment => "some comment")
     @item = StreamItem.last
     @item.should_not be_nil
-    @item.item_asset_string.should eql(@submission.asset_string)
-    @item.data.should be_is_a(OpenObject)
-    @item.data.submission_comments.should_not be_nil
-    @item.data.id.should eql(@submission.id)
-    @item.data.submission_comments[0].id.should eql(@comment.id)
-    @item.data.submission_comments[0].formatted_body.should eql(@comment.formatted_body(250))
+    @item.asset.should == @submission
+    @item.data.should be_is_a(Submission)
+    @item.data.submission_comments.target.should == [] # not stored on the stream item
+    @item.data.submission_comments.should == [@comment] # but we can still get them
   end
 
   it "should ensure the media object exists" do
@@ -218,7 +200,7 @@ This text has a http://www.google.com link in it...
         c2 = @submission1.add_comment(:author => @teacher1, :comment => "hello again!").reload
         @teacher1.conversations.size.should eql 1
         tc1 = @teacher1.conversations.first
-        tc1.last_message_at.to_i.should eql c2.created_at.to_i
+        tc1.last_message_at.to_i.should eql c1.created_at.to_i
         tc1.messages.last.body.should eql c2.comment
         tc1.messages.last.author.should eql @teacher1
       end
@@ -249,6 +231,31 @@ This text has a http://www.google.com link in it...
         sconvo = @student1.conversations.first
         sconvo.should be_unread
         tconvo.reload.should be_read
+      end
+
+      context "teacher makes first submission comment" do
+        it "should only show as sent for the teacher if private converstation does not already exist" do
+          @submission1.add_comment(:author => @teacher1, :comment => "test comment")
+          @teacher1.conversations.should be_empty
+          @teacher1.all_conversations.size.should eql 1
+          @teacher1.all_conversations.sent.size.should eql 1
+        end
+
+        it "should reuse an existing private conversation, but not change its state for teacher" do
+          convo = Conversation.initiate([@teacher1, @student1], true)
+          convo.add_message(@teacher1, 'direct message')
+          @teacher1.conversations.count.should == 1
+          convo = @teacher1.conversations.first
+          convo.workflow_state = 'archived'
+          convo.save!
+          @teacher1.reload.conversations.default.should be_empty
+
+          @submission1.add_comment(:author => @teacher1, :comment => "test comment")
+          @teacher1.reload
+          @teacher1.all_conversations.size.should eql 1
+          @teacher1.conversations.default.should be_empty
+          @teacher1.all_conversations.archived.size.should eql 1
+        end
       end
 
       context "with no_submission_comments_inbox" do
@@ -305,12 +312,12 @@ This text has a http://www.google.com link in it...
             @student1.conversations.unread.count.should == 1
           end
           it "should not block direct message from student" do
-            convo = Conversation.initiate([@student1.id, @teacher.id], false)
+            convo = Conversation.initiate([@student1, @teacher], false)
             convo.add_message(@student1, 'My direct message')
             @teacher.conversations.unread.count.should == 1
           end
           it "should add submission comments to existing conversations" do
-            convo = Conversation.initiate([@student1.id, @teacher1.id], true)
+            convo = Conversation.initiate([@student1, @teacher1], true)
             convo.add_message(@student1, 'My direct message')
             c = @teacher1.conversations.unread.first
             c.should_not be_nil
@@ -332,10 +339,11 @@ This text has a http://www.google.com link in it...
       it "should update conversations when assignments are unmuted" do
         @submission1.add_comment(:author => @teacher1, :comment => "!", :hidden => true)
         @teacher1.conversations.size.should eql 0
+        @teacher1.all_conversations.sent.size.should eql 0
         @student1.conversations.size.should eql 0
         @assignment.unmute!
-        @teacher1.reload.conversations.size.should eql 1
-        @teacher1.conversations.first.should be_read
+        @teacher1.reload.conversations.size.should eql 0
+        @teacher1.all_conversations.sent.size.should eql 1
         @student1.reload.conversations.size.should eql 1
         @student1.conversations.first.should be_unread
       end
@@ -387,20 +395,41 @@ This text has a http://www.google.com link in it...
         c3 = @submission1.add_comment(:author => @teacher2, :comment => "no", :hidden => true)
         @student1.conversations.size.should eql 0
         @teacher1.conversations.size.should eql 0
+        @teacher1.all_conversations.sent.size.should eql 0
         t2convo = @teacher2.conversations.first
         t2convo.workflow_state = :read
         t2convo.save!
 
         @assignment.unmute!
 
-        t1convo = @teacher1.reload.conversations.first
-        t1convo.should_not be_nil
-        t1convo.should be_read
+        # If there is more than one author in the set of submission comments,
+        # then it is treated as a new message for everyone.
+        @teacher1.reload.conversations.should be_empty
+        @teacher1.all_conversations.size.should eql 1
+        @teacher1.all_conversations.sent.size.should eql 0
         t2convo.reload.should be_unread
         @student1.reload.conversations.size.should eql 2
         @student1.conversations.first.should be_unread
         @student1.conversations.last.should be_unread
       end
+
+      it "should reuse an existing private conversation, but not change its state for teacher on unmute" do
+        convo = Conversation.initiate([@teacher1, @student1], true)
+        convo.add_message(@teacher1, 'direct message')
+        @teacher1.conversations.count.should == 1
+        convo = @teacher1.conversations.first
+        convo.workflow_state = 'archived'
+        convo.save!
+        @submission1.add_comment(:author => @teacher1, :comment => "test comment")
+
+        @assignment.unmute!
+
+        @teacher1.reload.conversations.default.should be_empty
+        @teacher1.all_conversations.size.should eql 1
+        @teacher1.all_conversations.archived.size.should eql 1
+        @teacher1.all_conversations.sent.size.should eql 1
+      end
+
     end
 
     context "deletion" do
@@ -427,14 +456,14 @@ This text has a http://www.google.com link in it...
         c2 = @submission1.add_comment(:author => @teacher1, :comment => "hello again!").reload
         c3 = @submission1.add_comment(:author => user, :comment => "ohai im in ur group")
         tc1 = @teacher1.conversations.first
-        tc1.last_message_at.to_i.should eql c2.created_at.to_i
+        tc1.last_message_at.to_i.should eql c1.created_at.to_i
         tc1.messages.last.body.should eql c2.comment
         tc1.messages.last.author.should eql @teacher1
 
         c3.destroy
 
         tc1.reload
-        tc1.last_message_at.to_i.should eql c2.created_at.to_i
+        tc1.last_message_at.to_i.should eql c1.created_at.to_i
         tc1.messages.last.body.should eql c2.comment
         tc1.messages.last.author.should eql @teacher1
       end
@@ -492,9 +521,9 @@ This text has a http://www.google.com link in it...
       end
 
       it "should only create messages where conversations already exist" do
-        convo1 = @student1.initiate_conversation([@teacher1.id])
+        convo1 = @student1.initiate_conversation([@teacher1])
         convo1.add_message('ohai')
-        convo2 = @student1.initiate_conversation([@teacher2.id])
+        convo2 = @student1.initiate_conversation([@teacher2])
         convo2.add_message('hey', :update_for_sender => false) # like if the student did a bulk private message
         @student1.conversations.size.should eql 1 # second one is not visible to student
         @student1.conversations.first.messages.size.should eql 1
@@ -520,7 +549,7 @@ This text has a http://www.google.com link in it...
       end
 
       it "should not change any unread count/status" do
-        convo = @student1.initiate_conversation([@teacher1.id])
+        convo = @student1.initiate_conversation([@teacher1])
         convo.add_message('ohai')
         @student1.conversations.size.should eql 1
         convo.messages.size.should eql 1
@@ -543,7 +572,7 @@ This text has a http://www.google.com link in it...
       end
 
       it "should update last_message_at, message_count and last_authored_at" do
-        convo = @student1.initiate_conversation([@teacher1.id])
+        convo = @student1.initiate_conversation([@teacher1])
         convo.add_message('ohai')
         tconvo = @teacher1.conversations.first
         raw_comment(@submission1, @student1, "hello", Time.now.utc + 1.day)
@@ -563,7 +592,7 @@ This text has a http://www.google.com link in it...
       end
 
       it "should skip submissions with no participant comments" do
-        convo = @student1.initiate_conversation([@teacher1.id])
+        convo = @student1.initiate_conversation([@teacher1])
         message = convo.add_message('ohai').reload
         tconvo = @teacher1.conversations.first
         raw_comment(@submission1, user, "ohai im in ur group", Time.now.utc + 1.day)
@@ -614,7 +643,7 @@ This text has a http://www.google.com link in it...
       comment.reload
       lambda { 
         comment.reply_from(:user => @student, :text => "some reply") 
-      }.should raise_error(IncomingMessageProcessor::UnknownAddressError)
+      }.should raise_error(IncomingMail::IncomingMessageProcessor::UnknownAddressError)
     end
   end
 

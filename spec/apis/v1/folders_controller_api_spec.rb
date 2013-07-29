@@ -145,8 +145,7 @@ describe "Folders API", :type => :integration do
 
       student_in_course(:course => @course, :active_all => true)
       json = api_call(:get, @folders_path + "/#{@root.id}/folders", @folders_path_options, {})
-      json[0]["locked"].should == true
-      json[0]["locked_for_user"].should == true
+      json.should be_empty
     end
 
     describe "folder in context" do
@@ -382,7 +381,7 @@ describe "Folders API", :type => :integration do
       api_call(:post, "/api/v1/folders/#{@root_folder.id}/files",
         { :controller => "folders", :action => "create_file", :format => "json", :folder_id => @root_folder.id.to_param, },
         :name => "with_path.txt")
-      attachment = Attachment.last(:order => :id)
+      attachment = Attachment.order(:id).last
       attachment.folder_id.should == @root_folder.id
     end
   end

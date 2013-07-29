@@ -33,21 +33,13 @@ class Rubric < ActiveRecord::Base
   serialize :data
   simply_versioned
   
-  named_scope :publicly_reusable, lambda {
-    {:conditions => {:reusable => true}, :order => :title}
-  }
-  named_scope :matching, lambda {|search|
-    {:order => 'rubrics.association_count DESC', :conditions => wildcard('rubrics.title', search)}
-  }
-  named_scope :before, lambda{|date|
-    {:conditions => ['rubrics.created_at < ?', date]}
-  }
-  named_scope :active, lambda{
-    {:conditions => ['workflow_state != ?', 'deleted'] }
-  }
-  
+  scope :publicly_reusable, where(:reusable => true).order(:title)
+  scope :matching, lambda { |search| where(wildcard('rubrics.title', search)).order("rubrics.association_count DESC") }
+  scope :before, lambda { |date| where("rubrics.created_at<?", date) }
+  scope :active, where("workflow_state<>'deleted'")
+
   set_policy do
-    given {|user, session| self.cached_context_grants_right?(user, session, :manage_grades)}
+    given {|user, session| self.cached_context_grants_right?(user, session, :manage_rubrics)}
     can :read and can :create and can :delete_associations
     
     given {|user, session| self.cached_context_grants_right?(user, session, :manage_assignments)}
@@ -60,13 +52,13 @@ class Rubric < ActiveRecord::Base
     given {|user, session| !self.read_only && self.rubric_associations.for_grading.length < 2 && self.cached_context_grants_right?(user, session, :manage_assignments)}
     can :update and can :delete
     
-    given {|user, session| !self.read_only && self.rubric_associations.for_grading.length < 2 && self.cached_context_grants_right?(user, session, :manage_grades)}
+    given {|user, session| !self.read_only && self.rubric_associations.for_grading.length < 2 && self.cached_context_grants_right?(user, session, :manage_rubrics)}
     can :update and can :delete
 
     given {|user, session| self.cached_context_grants_right?(user, session, :manage_assignments)}
     can :delete
     
-    given {|user, session| self.cached_context_grants_right?(user, session, :manage_grades)}
+    given {|user, session| self.cached_context_grants_right?(user, session, :manage_rubrics)}
     can :delete
 
     given {|user, session| self.cached_context_grants_right?(user, session, :read) }
@@ -98,7 +90,7 @@ class Rubric < ActiveRecord::Base
   
   alias_method :destroy!, :destroy
   def destroy
-    RubricAssociation.update_all({:bookmarked => false, :updated_at => Time.now.utc}, {:rubric_id => self.id})
+    RubricAssociation.where(:rubric_id => self).update_all(:bookmarked => false, :updated_at => Time.now.utc)
     self.workflow_state = 'deleted'
     self.save
   end
@@ -114,17 +106,16 @@ class Rubric < ActiveRecord::Base
   # a rubric_association are 'grading' and 'bookmark'.  Confusing,
   # I know.
   def destroy_for(context)
-    RubricAssociation.update_all({:bookmarked => false, :updated_at => Time.now.utc}, {:rubric_id => self.id, :context_id => context.id, :context_type => context.class.to_s})
-    if RubricAssociation.scoped(:conditions => {:rubric_id => self.id, :bookmarked => true}).count == 0
+    RubricAssociation.where(:rubric_id => self, :context_id => context, :context_type => context.class.to_s).
+        update_all(:bookmarked => false, :updated_at => Time.now.utc)
+    unless RubricAssociation.where(:rubric_id => self, :bookmarked => true).exists?
       self.destroy
     end
   end
 
+  attr_accessor :alignments_changed
   def update_alignments
-    # including @outcomes_changed is a shim for some plugin specs. this is
-    # TEMPORARY, the plugins should update to use the new variable, and, once
-    # they're updated, this shim removed. DO NOT USE in new code.
-    return unless @alignments_changed || @outcomes_changed
+    return unless @alignments_changed
     outcome_ids = (self.data || []).map{|c| c[:learning_outcome_id] }.compact.map(&:to_i).uniq
     LearningOutcome.update_alignments(self, context, outcome_ids)
     true
@@ -264,7 +255,7 @@ class Rubric < ActiveRecord::Base
         begin
           import_from_migration(rubric, migration)
         rescue
-          migration.add_warning(t('errors.could_not_import', "Couldn't import rubric %{rubric}", :rubric => rubric[:title]), $!)
+          migration.add_import_warning(t('#migration.rubric_type', "Rubric"), rubric[:title], $!)
         end
       end
     end
@@ -274,35 +265,50 @@ class Rubric < ActiveRecord::Base
     context = migration.context
     hash = hash.with_indifferent_access
     return nil if hash[:migration_id] && hash[:rubrics_to_import] && !hash[:rubrics_to_import][hash[:migration_id]]
-    item ||= find_by_context_id_and_context_type_and_id(context.id, context.class.to_s, hash[:id])
-    item ||= find_by_context_id_and_context_type_and_migration_id(context.id, context.class.to_s, hash[:migration_id]) if hash[:migration_id]
-    item ||= self.new(:context => context)
-    item.migration_id = hash[:migration_id]
-    item.workflow_state = 'active' if item.deleted?
-    item.title = hash[:title]
-    item.description = hash[:description]
-    item.points_possible = hash[:points_possible].to_f
-    item.read_only = hash[:read_only] unless hash[:read_only].nil?
-    item.reusable = hash[:reusable] unless hash[:reusable].nil?
-    item.public = hash[:public] unless hash[:public].nil?
-    item.hide_score_total = hash[:hide_score_total] unless hash[:hide_score_total].nil?
-    item.free_form_criterion_comments = hash[:free_form_criterion_comments] unless hash[:free_form_criterion_comments].nil?
-    
-    item.data = hash[:data]
-    item.data.each do |crit|
-      if crit[:learning_outcome_migration_id]
-        if migration.respond_to?(:outcome_to_id_map) && id = migration.outcome_to_id_map[crit[:learning_outcome_migration_id]]
-          crit[:learning_outcome_id] = id
-        elsif lo = context.created_learning_outcomes.find_by_migration_id(crit[:learning_outcome_migration_id])
-          crit[:learning_outcome_id] = lo.id
-        end
-        crit.delete :learning_outcome_migration_id
+
+    rubric = nil
+    if !item && hash[:external_identifier]
+      rubric = context.available_rubric(hash[:external_identifier])
+
+      if !rubric
+        migration.add_warning(t(:no_context_found, %{The external Rubric couldn't be found for "%{title}", creating a copy.}, :title => hash[:title]))
       end
     end
-    
-    context.imported_migration_items << item if context.imported_migration_items && item.new_record?
-    item.save!
-    
+
+    if rubric
+      item = rubric
+    else
+      item ||= find_by_context_id_and_context_type_and_id(context.id, context.class.to_s, hash[:id])
+      item ||= find_by_context_id_and_context_type_and_migration_id(context.id, context.class.to_s, hash[:migration_id]) if hash[:migration_id]
+      item ||= self.new(:context => context)
+      item.migration_id = hash[:migration_id]
+      item.workflow_state = 'active' if item.deleted?
+      item.title = hash[:title]
+      item.description = hash[:description]
+      item.points_possible = hash[:points_possible].to_f
+      item.read_only = hash[:read_only] unless hash[:read_only].nil?
+      item.reusable = hash[:reusable] unless hash[:reusable].nil?
+      item.public = hash[:public] unless hash[:public].nil?
+      item.hide_score_total = hash[:hide_score_total] unless hash[:hide_score_total].nil?
+      item.free_form_criterion_comments = hash[:free_form_criterion_comments] unless hash[:free_form_criterion_comments].nil?
+
+      item.data = hash[:data]
+      item.data.each do |crit|
+        if crit[:learning_outcome_migration_id]
+          item.alignments_changed = true
+          if migration.respond_to?(:outcome_to_id_map) && id = migration.outcome_to_id_map[crit[:learning_outcome_migration_id]]
+            crit[:learning_outcome_id] = id
+          elsif lo = context.created_learning_outcomes.find_by_migration_id(crit[:learning_outcome_migration_id])
+            crit[:learning_outcome_id] = lo.id
+          end
+          crit.delete :learning_outcome_migration_id
+        end
+      end
+
+      context.imported_migration_items << item if context.imported_migration_items && item.new_record?
+      item.save!
+    end
+
     unless context.rubric_associations.find_by_rubric_id(item.id)
       item.associate_with(context, context)
     end

@@ -9,4 +9,24 @@ ru:
     ru: pу́сский
 fr:
   locales:
-    fr: Français [bêta]
+    fr: Français
+zh:
+  locales:
+    zh: 中文
+ar:
+  locales:
+    ar: العربية
+pt:
+  locales:
+    pt: Português
+ja:
+  locales:
+    ja: 日本語
+nl:
+  locales:
+    nl: Nederlands (crowd-sourced)
+  crowdsourced: true
+ko:
+  locales:
+    ko: 한국말 (crowd-sourced)
+  crowdsourced: true

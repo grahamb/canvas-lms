@@ -51,7 +51,7 @@
       <% if !only || only.include?(:external_urls) %>
       <div id="external_urls_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "link.png", :alt => t(:external_url_link_alt, "External URL") %>
+          <i class="icon-link"></i>
           <%= t :external_url_notice, "Enter a URL and page name to add a link to any website URL to this *module*.", :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <table>
@@ -74,17 +74,19 @@
       <% if !only || only.include?(:external_tools) %>
       <div id="context_external_tools_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "link.png", :alt => t(:external_tool_link_alt, "External tool") %>
+          <i class="icon-link"></i>
           <%= t :external_tool_notice, "Select a tool from the list below, or enter a URL for an external tool you already know is configured with Basic LTI to add a link to it to this *module*.", :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
-        <a href="<%= context_url(@context, :context_external_tools_url, :include_parents => '1') %>" class="external_tools_url" style="display: none;">&nbsp;</a>
+        <a href="<%= context_url(@context, :context_external_tools_url, :include_parents => '1', :per_page => '50') %>" class="external_tools_url" style="display: none;">&nbsp;</a>
         <table>
           <tr>
-            <td colspan="2" class="tools">
-              <div class="message" style="margin: 10px 0;"><%= t :loading, "Loading..." %></div>
-              <div class="tool" style="display: none;">
-                <div class="name"></div>
-                <div class="description"></div>
+            <td colspan="2">
+              <div class="tools" style="max-height: 250px; overflow: auto;">
+                <div class="message" style="margin: 10px 0;"><%= t :loading, "Loading..." %></div>
+                <div class="tool" style="display: none;">
+                  <div class="name"></div>
+                  <div class="description"></div>
+                </div>
               </div>
             </td>
           </tr>
@@ -113,14 +115,14 @@
       <% if !only || only.include?(:wiki_pages) %>
       <div id="wiki_pages_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "file.png", :alt => t(:wiki_page_alt, "Wiki page") %>
+          <i class="icon-document"></i>
           <%= t :wiki_page_notice, 'Select the wiki page you want to associate with this *module*, or add a new page by selecting "New Page".', :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <div style="margin-top: 5px;">
         <select class="module_item_select" multiple>
           <%# cache on the context.wiki instead of just the context because even though it will require a db query, we will get a much better cache hit rate %>
           <% cache([@context.wiki, 'active_wiki_pages']) do  %>
-            <% @context.wiki.wiki_pages.active.scoped({:select => "id, title"}).each do |page| %>
+            <% @context.wiki.wiki_pages.active.select([:id, :title]).each do |page| %>
               <% if page && !page.new_record? %>
                 <option value="<%= page.id %>"><%= page.title %></option>
               <% end %>
@@ -139,21 +141,15 @@
       <% if !only || only.include?(:attachments) %>
       <div id="attachments_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "file_download.png" %>
+          <i class="icon-download"></i>
           <%= t :file_notice, 'Select the file you want to associate with this *module*, or add a file by selecting "New File".', :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <div style="margin-top: 5px;">
         <select class="module_item_select" multiple>
-          <% @context.folders.active.scoped({:limit => 200}).sort_by{|f| f.full_name}.each do |folder| %>
+          <% includes = @context.grants_right?(@current_user, session, :manage_files) ? :active_file_attachments : :visible_file_attachments %>
+          <% @context.folders.active.limit(200).includes(includes).sort_by{|f| f.full_name}.each do |folder| %>
             <optgroup label="<%= folder.full_name %>">
-              <% 
-              attachments = if @context.grants_right?(@current_user, session, :manage_files)
-                              folder.active_file_attachments.by_position_then_display_name
-                            else
-                              folder.visible_file_attachments.by_position_then_display_name
-                            end
-              %>
-              <% attachments.sort_by{|file| file.display_name }.each do |file| %>
+              <% folder.send(includes).sort_by{|file| file.display_name }.each do |file| %>
                 <option value="<%= file.id %>"><%= file.display_name %></option>
               <% end %>
             </optgroup>
@@ -172,7 +168,7 @@
                 <%= before_label :folder, "Folder" %>
               </td><td>
                 <% Folder.root_folders(@context) %>
-                <% folders = @context.active_folders_with_sub_folders.by_position %>
+                <% folders = @context.active_folders.all %>
                 <% root_folders = folders.select{|f| f.parent_folder_id == nil} %>
                 <select name="attachment[folder_id]" id="attachment_folder_id">
                   <%= folders_as_options(root_folders, :all_folders => folders, :max_depth => 1) %>
@@ -186,12 +182,12 @@
       <% if !only || only.include?(:quizzes) %>
       <div id="quizs_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "quiz.png", :alt => t(:quiz_alt, "Quiz") %>
+          <i class="icon-quiz"></i>
           <%= t :quiz_notice, 'Select the quiz you want to associate with this *module*, or add a new one by selecting "New Quiz".', :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <div style="margin-top: 5px;">
         <select class="module_item_select" multiple>
-          <% @context.quizzes.active.scoped({:limit => 400}).each do |quiz| %>
+          <% @context.quizzes.active.limit(400).each do |quiz| %>
             <option value="<%= quiz.id %>"><%= quiz.title %></option>
           <% end %>
           <option value="new"><%= t :new_quiz_option, "[ New Quiz ]" %></option>
@@ -226,14 +222,14 @@
       <% if !only || only.include?(:assignments) %>
       <div id="assignments_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "grading_icon.png", :alt => t(:assignment_alt, "Assignment") %>
+          <i class="icon-assignment"></i>
           <%= t :assignment_notice, 'Select the assignment you want to associate with this *module*, or add an assignment by selecting "New Assignment".', :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <div style="margin-top: 5px;">
         <select class="module_item_select" multiple>
           <% @context.assignment_groups.active.include_active_assignments.each do |group| %>
             <optgroup label="<%= group.name %>">
-            <% group.active_assignments.no_graded_quizzes_or_topics.scoped({:limit => 200}).each do |assignment| %>
+            <% group.active_assignments.no_graded_quizzes_or_topics.limit(200).each do |assignment| %>
               <option value="<%= assignment.id %>"><%= assignment.title %></option>
             <% end %>
             </optgroup>
@@ -251,7 +247,7 @@
       <% if !only || only.include?(:discussion_topics) %>
       <div id="discussion_topics_select" class="module_item_option" style="margin: 5px 20px;">
         <div style="font-size: 0.8em;">
-          <%= image_tag "word_bubble.png", :alt => t(:topic_alt, "Topic") %>
+          <i class="icon-discussion"></i>
           <%= t :topic_notice, 'Select the topic you want to associate with this *module*, or add a topic by selecting "New Topic".', :wrapper => '<span class="holder_type">\1</span>' %>
         </div>
         <div style="margin-top: 5px;">

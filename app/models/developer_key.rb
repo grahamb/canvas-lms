@@ -36,21 +36,21 @@ class DeveloperKey < ActiveRecord::Base
     self.tool_id = nil if tool_id.blank?
     self.icon_url = nil if icon_url.blank?
   end
-  
+
   def generate_api_key(overwrite=false)
     self.api_key = AutoHandle.generate(nil, 64) if overwrite || !self.api_key
   end
-  
+
   def self.default
     get_special_key("User-Generated")
   end
-  
+
   def account_name
     account.try(:name)
   end
-  
+
   def self.get_special_key(default_key_name)
-    Shard.default.activate do
+    Shard.birth.activate do
       @special_keys ||= {}
 
       if Rails.env.test?
@@ -78,7 +78,7 @@ class DeveloperKey < ActiveRecord::Base
   def redirect_domain_matches?(redirect_uri)
     self_domain = URI.parse(self.redirect_uri).host
     other_domain = URI.parse(redirect_uri).host
-    return self_domain.present? && (self_domain == other_domain || other_domain.end_with?(".#{self_domain}"))
+    return self_domain.present? && other_domain.present? && (self_domain == other_domain || other_domain.end_with?(".#{self_domain}"))
   rescue URI::InvalidURIError
     return false
   end

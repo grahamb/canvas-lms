@@ -42,7 +42,7 @@ module Api::V1::AssignmentOverride
 
   def assignment_override_scope(assignment, include_students=false)
     scope = assignment.overrides_visible_to(@current_user)
-    scope = scope.scoped(:include => :assignment_override_students) if include_students
+    scope = scope.includes(:assignment_override_students) if include_students
     scope
   end
 
@@ -50,10 +50,10 @@ module Api::V1::AssignmentOverride
     scope = assignment_override_scope(assignment)
     case set_or_id
     when CourseSection, Group
-      scope.scoped(:conditions => {
+      scope.where(
         :set_type => set_or_id.class.to_s,
-        :set_id => set_or_id.id
-      }).first
+        :set_id => set_or_id
+      ).first
     when nil
       nil
     else
@@ -62,8 +62,8 @@ module Api::V1::AssignmentOverride
   end
 
   def find_group(assignment, group_id)
-    scope = Group.active.scoped(:conditions => {:context_type => 'Course'}).scoped(:conditions => "group_category_id IS NOT NULL")
-    scope = scope.scoped(:conditions => {:context_id => assignment.context_id, :group_category_id => assignment.group_category_id}) if assignment
+    scope = Group.active.where(:context_type => 'Course').where("group_category_id IS NOT NULL")
+    scope = scope.where(:context_id => assignment.context_id, :group_category_id => assignment.group_category_id) if assignment
     group = scope.find(group_id)
     raise ActiveRecord::RecordNotFound unless group.grants_right?(@current_user, session, :read)
     group
@@ -71,7 +71,7 @@ module Api::V1::AssignmentOverride
 
   def find_section(context, section_id)
     scope = CourseSection.active
-    scope = scope.scoped(:conditions => {:course_id => context.id}) if context
+    scope = scope.where(:course_id => context) if context
     section = api_find(scope, section_id)
     raise ActiveRecord::RecordNotFound unless section.grants_right?(@current_user, session, :read)
     section
@@ -139,20 +139,15 @@ module Api::V1::AssignmentOverride
     end
 
     if !set_type && data.has_key?(:course_section_id)
-      if assignment.group_category_id
-        # don't recognize course_section_id for group assignments
-        errors << "course_section_id is not valid for group assignments"
-      else
-        set_type = 'CourseSection'
+      set_type = 'CourseSection'
 
-        # look up the section
-        begin
-          section = find_section(assignment.context, data[:course_section_id])
-        rescue ActiveRecord::RecordNotFound
-          errors << "unknown section id #{data[:course_section_id].inspect}"
-        end
-        override_data[:section] = section
+      # look up the section
+      begin
+        section = find_section(assignment.context, data[:course_section_id])
+      rescue ActiveRecord::RecordNotFound
+        errors << "unknown section id #{data[:course_section_id].inspect}"
       end
+      override_data[:section] = section
     end
 
     errors << "one of student_ids, group_id, or course_section_id is required" if !set_type && errors.empty?
@@ -165,7 +160,7 @@ module Api::V1::AssignmentOverride
     # collect override values
     [:due_at, :unlock_at, :lock_at].each do |field|
       if data.has_key?(field)
-        if data[field].empty?
+        if data[field].blank?
           # override value of nil/'' is meaningful
           override_data[field] = nil
         elsif value = Time.zone.parse(data[field].to_s)
@@ -201,8 +196,11 @@ module Api::V1::AssignmentOverride
       end
 
       unless defunct_student_ids.empty?
+        # on Rails 2, the delete_all will do an update_all
+        # if we don't put the scoped in. weird.
         override.assignment_override_students.
-          scoped(:conditions => {:user_id => defunct_student_ids.to_a}).
+          where(:user_id => defunct_student_ids.to_a).
+          scoped.
           delete_all
       end
     end
@@ -249,6 +247,7 @@ module Api::V1::AssignmentOverride
         defunct_override_ids.delete(override.id)
       else
         override = assignment.assignment_overrides.build
+        override.dont_touch_assignment = true
       end
 
       # interpret and apply the data
@@ -266,7 +265,7 @@ module Api::V1::AssignmentOverride
     # a new override targets the set of a deleted one
     unless defunct_override_ids.empty?
       assignment.assignment_overrides.
-        scoped(:conditions => {:id => defunct_override_ids.to_a}).
+        where(:id => defunct_override_ids.to_a).
         each(&:destroy)
     end
 
@@ -276,4 +275,16 @@ module Api::V1::AssignmentOverride
     # save the new/kept overrides
     overrides.each{ |override| override.save! }
   end
+
+  def deserialize_overrides( overrides )
+    if overrides.is_a?(Hash)
+      return unless overrides.keys.all?{ |k| k.to_i.to_s == k.to_s }
+      indices = overrides.keys.sort_by(&:to_i)
+      return unless indices.map(&:to_i) == (0...indices.size).to_a
+      overrides = indices.map{ |index| overrides[index] }
+    else
+      overrides
+    end
+  end
+
 end

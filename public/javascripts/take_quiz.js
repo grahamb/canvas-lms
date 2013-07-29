@@ -16,11 +16,15 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 define([
+  'compiled/views/quizzes/FileUploadQuestionView',
+  'compiled/models/File',
   'i18n!quizzes.take_quiz',
   'jquery' /* $ */,
   'quiz_timing',
   'compiled/behaviors/autoBlurActiveInput',
+  'underscore',
   'jquery.ajaxJSON' /* ajaxJSON */,
+  'jquery.toJSON',
   'jquery.instructure_date_and_time' /* friendlyDatetime, friendlyDate */,
   'jquery.instructure_forms' /* getFormData, errorBox */,
   'jqueryui/dialog',
@@ -30,9 +34,10 @@ define([
   'tinymce.editor_box' /* editorBox */,
   'vendor/jquery.scrollTo' /* /\.scrollTo/ */,
   'compiled/behaviors/quiz_selectmenu'
-], function(I18n, $, timing, autoBlurActiveInput) {
+], function(FileUploadQuestionView, File, I18n, $, timing, autoBlurActiveInput, _) {
 
   var lastAnswerSelected = null;
+  var lastSuccessfulSubmissionData = null;
   var quizSubmission = (function() {
     var timeMod = 0,
         started_at =  $(".started_at"),
@@ -58,6 +63,9 @@ define([
       started_at: started_at,
       end_at: end_at,
       time_limit: parseInt($(".time_limit").text(), 10) || null,
+      oneAtATime: $("#submit_quiz_form").hasClass("one_question_at_a_time"),
+      cantGoBack: $("#submit_quiz_form").hasClass("cant_go_back"),
+      finalSubmitButtonClicked: false,
       updateSubmission: function(repeat, beforeLeave) {
         if(quizSubmission.submitting && !repeat) { return; }
         var now = new Date();
@@ -66,8 +74,10 @@ define([
         quizSubmission.currentlyBackingUp = true;
         quizSubmission.lastSubmissionUpdate = new Date();
         var data = $("#submit_quiz_form").getFormData();
-        $(".question_holder .question.marked").each(function() {
-          data[$(this).attr('id') + "_marked"] = "1";
+
+        $(".question_holder .question").each(function() {
+          value = ($(this).hasClass("marked")) ? "1" : "";
+          data[$(this).attr('id') + "_marked"] = value;
         });
 
         $last_saved.text(I18n.t('saving', 'Saving...'));
@@ -85,48 +95,94 @@ define([
           });
         }
         else {
-          $.ajaxJSON(url, 'PUT', data,
-            // Success callback
-            function(data) {
-              $last_saved.text(I18n.t('saved_at', 'Saved at %{t}', { t: $.friendlyDatetime(new Date()) }));
+          (function(submissionData) {
+            // Need a shallow clone of the data here because $.ajaxJSON modifies in place
+            var thisSubmissionData = _.clone(submissionData);
+            // If this is a timeout-based submission and the data is the same as last time,
+            // palliate the server by skipping the data submission
+            if (repeat && _.isEqual(submissionData, lastSuccessfulSubmissionData)) {
               quizSubmission.currentlyBackingUp = false;
-              if(repeat) {
-                setTimeout(function() {quizSubmission.updateSubmission(true) }, 30000);
-              }
-              if(data && data.end_at) {
-                var endAtFromServer     = Date.parse(data.end_at),
-                    submissionEndAt     = Date.parse(quizSubmission.end_at.text()),
-                    serverEndAtTime     = endAtFromServer.getTime(),
-                    submissionEndAtTime = submissionEndAt.getTime();
-
-                quizSubmission.referenceDate = null;
-
-                // if the new end_at from the server is different than our current end_at, then notify
-                // the user that their time limit's changed and let updateTime do the rest.
-                if (serverEndAtTime !== submissionEndAtTime) {
-                  serverEndAtTime > submissionEndAtTime ?
-                    $.flashMessage(I18n.t('notices.extra_time', 'You have been given extra time on this attempt')) :
-                    $.flashMessage(I18n.t('notices.less_time', 'Your time for this quiz has been reduced.'));
-
-                  quizSubmission.end_at.text(data.end_at);
-                  endAtText   = data.end_at;
-                  endAtParsed = new Date(data.end_at);
-                }
-              }
-            },
-            // Error callback
-            function() {
-            var current_user_id = $("#identity .user_id").text() || "none";
-            quizSubmission.currentlyBackingUp = false;
-            $.ajaxJSON(location.protocol + '//' + location.host + "/simple_response.json?user_id=" + current_user_id + "&rnd=" + Math.round(Math.random() * 9999999), 'GET', {}, function() {
-            }, function() {
-              ajaxErrorFlash(I18n.t('errors.connection_lost', "Connection to %{host} was lost.  Please make sure you're connected to the Internet before continuing.", {'host': location.host}), request);
-            }, {skipDefaultError: true});
-
-            if(repeat) {
-              setTimeout(function() {quizSubmission.updateSubmission(true) }, 30000);
+              setTimeout(function() { quizSubmission.updateSubmission(true) }, 30000);
+              return;
             }
-          }, {timeout: 5000 });
+            $.ajaxJSON(url, 'PUT', submissionData,
+              // Success callback
+              function(data) {
+                lastSuccessfulSubmissionData = thisSubmissionData;
+                $last_saved.text(I18n.t('saved_at', 'Quiz saved at %{t}', { t: $.friendlyDatetime(new Date()) }));
+                quizSubmission.currentlyBackingUp = false;
+                if(repeat) {
+                  setTimeout(function() {quizSubmission.updateSubmission(true) }, 30000);
+                }
+                if(data && data.end_at) {
+                  var endAtFromServer     = Date.parse(data.end_at),
+                      submissionEndAt     = Date.parse(quizSubmission.end_at.text()),
+                      serverEndAtTime     = endAtFromServer.getTime(),
+                      submissionEndAtTime = submissionEndAt.getTime();
+
+                  quizSubmission.referenceDate = null;
+
+                  // if the new end_at from the server is different than our current end_at, then notify
+                  // the user that their time limit's changed and let updateTime do the rest.
+                  if (serverEndAtTime !== submissionEndAtTime) {
+                    serverEndAtTime > submissionEndAtTime ?
+                      $.flashMessage(I18n.t('notices.extra_time', 'You have been given extra time on this attempt')) :
+                      $.flashMessage(I18n.t('notices.less_time', 'Your time for this quiz has been reduced.'));
+
+                    quizSubmission.end_at.text(data.end_at);
+                    endAtText   = data.end_at;
+                    endAtParsed = new Date(data.end_at);
+                  }
+                }
+              },
+              // Error callback
+              function(resp, ec) {
+                var current_user_id = $("#identity .user_id").text() || "none";
+                quizSubmission.currentlyBackingUp = false;
+
+                // has the user logged out?
+                // TODO: support this redirect in LDB, by getting out of high security mode.
+                if (!ENV.LOCKDOWN_BROWSER && (ec.status == 401 || resp['status'] == 'unauthorized')) {
+                  var $dialog = $("#deauthorized_dialog");
+                  if ($dialog.is(':data(dialog)')) {
+                    if (!$dialog.dialog("isOpen")) { $dialog.dialog("open"); }
+                  } else {
+                    $dialog.dialog({
+                      modal: true,
+                      buttons: [{
+                        text: I18n.t("#buttons.cancel", "Cancel"),
+                        'class': "dialog_closer",
+                        click: function() { $(this).dialog("close"); }
+                      }, {
+                        text: I18n.t("#buttons.login", "Login"),
+                        'class': "btn-primary relogin_button button_type_submit",
+                        click: function() {
+                          quizSubmission.navigatingToRelogin = true;
+                          $('#deauthorized_dialog').submit();
+                        }
+                      }]
+                    });
+                  }
+                } else {
+                  $.ajaxJSON(
+                      location.protocol + '//' + location.host + "/simple_response.json?user_id=" + current_user_id + "&rnd=" + Math.round(Math.random() * 9999999),
+                      'GET', {},
+                      function() {},
+                      function() {
+                        $.flashError(I18n.t('errors.connection_lost', "Connection to %{host} was lost.  Please make sure you're connected to the Internet before continuing.", {'host': location.host}));
+                      }
+                  );
+                }
+
+                if(repeat) {
+                  setTimeout(function() {quizSubmission.updateSubmission(true) }, 30000);
+                }
+              },
+              {
+                timeout: 5000
+              }
+            );
+          })(data);
         }
       },
 
@@ -153,7 +209,7 @@ define([
           $countdown_seconds.text(d.getUTCSeconds());
           if(diff <= 0 && !quizSubmission.submitting) {
             quizSubmission.submitting = true;
-            $("#submit_quiz_form").submit();
+            quizSubmission.submitQuiz();
           }
         }
         var diff = quizSubmission.referenceDate.getTime() - now.getTime() - quizSubmission.clientServerDiff;
@@ -176,7 +232,7 @@ define([
               close: function() {
                 if(!quizSubmission.submitting) {
                   quizSubmission.submitting = true;
-                  $("#submit_quiz_form").submit();
+                  quizSubmission.submitQuiz();
                 }
               }
             });
@@ -212,6 +268,46 @@ define([
         if(true || min) { times.push(I18n.t('minutes_count', "Minute", {'count': min})); }
         if(true || sec) { times.push(I18n.t('seconds_count', "Second", {'count': sec})); }
         $time_running_time_remaining.text(times.join(", "));
+      },
+      updateFinalSubmitButtonState: function() {
+        var allQuestionsAnswered = ($("#question_list li:not(.answered)").length == 0);
+        var lastQuizPage = ($("#submit_quiz_form").hasClass('last_page'));
+        var thisQuestionAnswered = ($("div.question.answered").length > 0);
+        var oneAtATime = quizSubmission.oneAtATime;
+
+        var active = (oneAtATime && lastQuizPage && thisQuestionAnswered) || allQuestionsAnswered;
+
+        quizSubmission.toggleActiveButtonState("#submit_quiz_button", active);
+      },
+
+      updateQuestionIndicators: function(answer, questionId){
+        var listSelector = "#list_" + questionId;
+        var questionSelector = "#" + questionId;
+        var combinedId = listSelector + ", " + questionSelector;
+        var $questionIcon = $(listSelector + "> i.placeholder");
+        if(answer) {
+          $(combinedId).addClass('answered');
+          $questionIcon.addClass('icon-check').removeClass('icon-question');
+          $questionIcon.siblings('div.icon-text').text(I18n.t('question_answered',"Answered"))
+        } else {
+          $(combinedId).removeClass('answered');
+          $questionIcon.addClass('icon-question').removeClass('icon-check');
+          $questionIcon.siblings('div.icon-text').text(I18n.t('question_unanswered', "Haven't Answered Yet"))
+        }
+      },
+
+      updateNextButtonState: function(id) {
+        var $question = $("#" + id);
+        quizSubmission.toggleActiveButtonState('button.next-question', $question.hasClass('answered'));
+      },
+      toggleActiveButtonState: function(selector, primary) {
+        var addClass = (primary ? 'btn-primary' : 'btn-secondary');
+        var removeClass = (primary ? 'btn-secondary' : 'btn-primary');
+        $(selector).addClass(addClass).removeClass(removeClass);
+      },
+      submitQuiz: function() {
+        var action = $('#submit_quiz_button').data('action');
+        $('#submit_quiz_form').attr('action', action).submit();
       }
     };
   })();
@@ -228,13 +324,21 @@ define([
 
     if($("#preview_mode_link").length == 0) {
       window.onbeforeunload = function() {
-        quizSubmission.updateSubmission(false, true);
-        if(!quizSubmission.submitting && !quizSubmission.alreadyAcceptedNavigatingAway) {
-          return I18n.t('confirms.unfinished_quiz', "You're about to leave the quiz unfinished.  Continue anyway?");
+        if (!quizSubmission.navigatingToRelogin) {
+          quizSubmission.updateSubmission(false, true);
+          if(!quizSubmission.submitting && !quizSubmission.alreadyAcceptedNavigatingAway) {
+            return I18n.t('confirms.unfinished_quiz', "You're about to leave the quiz unfinished.  Continue anyway?");
+          }
         }
       };
       $(document).delegate('a', 'click', function(event) {
         if($(this).closest('.ui-dialog,.mceToolbar,.ui-selectmenu').length > 0) { return; }
+        
+        if($(this).hasClass('no-warning')) {
+          quizSubmission.alreadyAcceptedNavigatingAway = true
+          return;
+        }
+
         if(!event.isDefaultPrevented()) {
           var url = $(this).attr('href') || "";
           var hashStripped = location.href;
@@ -258,7 +362,8 @@ define([
       .delegate(".jump_to_question_link", 'click', function(event) {
         event.preventDefault();
         var $obj = $($(this).attr('href'));
-        $("html,body").scrollTo($obj.parent());
+        var scrollableSelector = ENV.MOBILE_UI ? '#content' : 'html,body';
+        $(scrollableSelector).scrollTo($obj.parent());
         $obj.find(":input:first").focus().select();
       })
       .find(".list_question").bind({
@@ -273,12 +378,17 @@ define([
             title = I18n.t('titles.answered', "Answered");
           }
           $this.attr('title', title);
-          data.relatedQuestion || (data.relatedQuestion = $("#" + $this.attr('id').substring(5)));
-          data.relatedQuestion.addClass('related');
+
+          if(!quizSubmission.oneAtATime) {
+            data.relatedQuestion || (data.relatedQuestion = $("#" + $this.attr('id').substring(5)));
+            data.relatedQuestion.addClass('related');
+          }
         },
         mouseleave: function(event) {
-          var relatedQuestion = $(this).data('relatedQuestion')
-          relatedQuestion && relatedQuestion.removeClass('related');
+          if(!quizSubmission.oneAtATime) {
+            var relatedQuestion = $(this).data('relatedQuestion')
+            relatedQuestion && relatedQuestion.removeClass('related');            
+          }
         }
       });
 
@@ -323,6 +433,7 @@ define([
         var $question = $(this).parents(".question");
         $question.toggleClass('marked');
         $("#list_" + $question.attr('id')).toggleClass('marked');
+        quizSubmission.updateSubmission();
       })
       .delegate(".question_input", 'change', function(event, update, changedMap) {
         var $this = $(this),
@@ -337,7 +448,7 @@ define([
 
         if (tagName == "TEXTAREA") {
           val = $this.editorBox('get_code');
-        } else if ($this.attr('type') == "text") {
+        } else if ($this.attr('type') == "text" || $this.attr('type') == 'hidden') {
           val = $this.val();
         } else if (tagName == "SELECT") {
           var $selects = $this.parents(".question").find("select.question_input");
@@ -349,10 +460,13 @@ define([
             }
           });
         }
-        $("#list_" + id)[val ? 'addClass' : 'removeClass']('answered');
-      })
-      .find(".question_input").trigger('change', [false, {}]);
 
+        quizSubmission.updateQuestionIndicators(val, id);
+        quizSubmission.updateFinalSubmitButtonState();
+        quizSubmission.updateNextButtonState(id);
+      })
+
+    $questions.find(".question_input").trigger('change', [false, {}]);
 
     setInterval(function() {
       $("textarea.question_input").each(function() {
@@ -386,17 +500,55 @@ define([
         return false;
     });
 
+    $(".quiz_submit").click(function(event) {
+      quizSubmission.finalSubmitButtonClicked = true;
+    });
+
     $("#submit_quiz_form").submit(function(event) {
       $(".question_holder textarea.question_input").each(function() { $(this).change(); });
-      unanswered = $("#question_list .list_question:not(.answered)").length;
-      if(unanswered && !quizSubmission.submitting) {
-        var result = confirm(I18n.t('confirms.unanswered_questions', {'one': "You have 1 unanswered question (see the right sidebar for details).  Submit anyway?", 'other': "You have %{count} unanswered questions (see the right sidebar for details).  Submit anyway?"}, {'count': unanswered}));
+
+      var unanswered;
+      var warningMessage;
+      
+      if(quizSubmission.cantGoBack) {
+        if(!$(".question").hasClass("answered")) {
+          warningMessage = I18n.t('confirms.cant_go_back_blank',
+            "You can't come back to this question once you hit next. Are you sure you want to leave it blank?");
+        }
+      }
+
+      if(quizSubmission.finalSubmitButtonClicked) {
+        quizSubmission.finalSubmitButtonClicked = false; // reset in case user cancels
+
+        if(quizSubmission.cantGoBack) {
+          unseen = $("#question_list .list_question:not(.seen)").length;
+          if(unseen > 0) {
+            warningMessage = I18n.t('confirms.unseen_questions',
+              {'one': "There is still 1 question you haven't seen yet.  Submit anyway?",
+               'other': "There are still %{count} questions you haven't seen yet.  Submit anyway?"},
+               {'count': unseen})            
+          }
+        }
+        else {
+          unanswered = $("#question_list .list_question:not(.answered)").length;
+          if(unanswered > 0) {
+            warningMessage = I18n.t('confirms.unanswered_questions',
+              {'one': "You have 1 unanswered question (see the right sidebar for details).  Submit anyway?",
+               'other': "You have %{count} unanswered questions (see the right sidebar for details).  Submit anyway?"},
+               {'count': unanswered});            
+          }
+        }
+      }
+
+      if(warningMessage != undefined && !quizSubmission.submitting) {
+        var result = confirm(warningMessage);
         if(!result) {
           event.preventDefault();
           event.stopPropagation();
           return false;
         }
-      }
+      }        
+
       quizSubmission.submitting = true;
     });
 
@@ -414,15 +566,34 @@ define([
 
     setInterval(quizSubmission.updateTime, 400);
 
-    var current_user_id = $("#identity .user_id").text() || "none";
-    setInterval(function() {
-      $.ajaxJSON(location.protocol + '//' + location.host + "/simple_response.json?user_id=" + current_user_id + "&rnd=" + Math.round(Math.random() * 9999999), 'GET', {}, function() {
-      }, function() {
-        ajaxErrorFlash(I18n.t('errors.connection_lost', "Connection to %{host} was lost.  Please make sure you're connected to the Internet before continuing.", {'host': location.host}), request);
-      }, {skipDefaultError: true});
-    }, 30000);
-
     setTimeout(function() { quizSubmission.updateSubmission(true) }, 15000);
+
+    var $submit_buttons = $("#submit_quiz_form button[type=submit]");
+
+    // set the form action depending on the button clicked
+    $submit_buttons.click(function(event) {
+      // call updateSubmission with beforeLeave=true so quiz is saved synchronously
+      quizSubmission.updateSubmission(false, true);
+
+      var action = $(this).data('action');
+      if(action != undefined) {
+        $('#submit_quiz_form').attr('action', action);
+      }
+    });
+
+    // now that JS has been initialized, enable the next and previous buttons
+    $submit_buttons.removeAttr('disabled');
   });
+
+  $('.file-upload-question-holder').each(function(i,el) {
+    var $el = $(el);
+    var val = parseInt($el.find('input.attachment-id').val(),10);
+    if (val && val !==  0){
+      $el.find('.file-upload-box').addClass('file-upload-box-with-file');
+    }
+    var model = new File(ENV.ATTACHMENTS[val], {preflightUrl: ENV.UPLOAD_URL});
+    new FileUploadQuestionView({el: el, model: model}).render();
+  });
+
 });
 

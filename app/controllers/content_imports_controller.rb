@@ -93,8 +93,8 @@ class ContentImportsController < ApplicationController
           render :json => @migration.errors, :status => :bad_request
         end
       else
-        @plugins = Canvas::Plugin.all_for_tag(:export_system)
-        @select_options = @plugins.map{|p|[p.metadata(:select_text), p.id]}
+        @plugins = ContentMigration.migration_plugins(true)
+        @select_options = @plugins.select{|p| p.settings[:migration_partial].present? }.map{|p|[p.metadata(:select_text), p.id]}
         @pending_migrations = ContentMigration.find_all_by_context_id(@context.id).any?
         render
       end
@@ -113,7 +113,7 @@ class ContentImportsController < ApplicationController
 
   def migrate_content_s3_success
     load_migration_and_attachment do
-      if Attachment.s3_storage? && details = AWS::S3::S3Object.about(@attachment.full_filename, @attachment.bucket_name) rescue nil
+      if Attachment.s3_storage? && details = @attachment.s3object.head rescue nil
         @attachment.process_s3_details!(details)
         @migration.export_content
       end
@@ -123,7 +123,7 @@ class ContentImportsController < ApplicationController
   def migrate_content_choose
     if authorized_action(@context, @current_user, :manage_content)
       @content_migration = ContentMigration.for_context(@context).find(params[:id]) #)_all_by_context_id_and_context_type(@context.id, @context.class.to_s).last
-      if @content_migration.progress && @content_migration.progress >= 100
+      if @content_migration.workflow_state == "imported"
         flash[:notice] = t 'notices.already_imported', "That extraction has already been imported into the course"
         redirect_to named_context_url(@context, :context_url)
         return
@@ -148,11 +148,12 @@ class ContentImportsController < ApplicationController
       @content_migration = ContentMigration.find_by_context_id_and_context_type_and_id(@context.id, @context.class.to_s, migration_id) if migration_id.present?
       @content_migration ||= ContentMigration.find_by_context_id_and_context_type(@context.id, @context.class.to_s, :order => "id DESC")
       if request.method == :post
+        @content_migration.set_date_shift_options(params[:copy] || {})
         process_migration_params
         @content_migration.migration_settings[:migration_ids_to_import] = params
         @content_migration.save
         @content_migration.import_content
-        render :json => {:success => true}.to_json
+        render :text => {:success => true}.to_json
       else
         render :json => @content_migration.to_json
       end

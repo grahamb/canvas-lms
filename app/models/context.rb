@@ -27,7 +27,7 @@ module Context
     User = ::User
     Group = ::Group
   end
-  
+
   module AssetTypes
     Announcement = ::Announcement
     AssessmentQuestion = ::AssessmentQuestion
@@ -45,6 +45,7 @@ module Context
     LearningOutcome = ::LearningOutcome
     LearningOutcomeGroup = ::LearningOutcomeGroup
     MediaObject = ::MediaObject
+    Progress = ::Progress
     Quiz = ::Quiz
     QuizGroup = ::QuizGroup
     QuizQuestion = ::QuizQuestion
@@ -55,13 +56,9 @@ module Context
     WebConference = ::WebConference
     Wiki = ::Wiki
     WikiPage = ::WikiPage
-    
+
     def self.get_for_string(str)
-      if RUBY_VERSION >= "1.9."
-        self.const_defined?(str, false) ? self.const_get(str, false) : nil
-      else
-        self.const_defined?(str) ? self.const_get(str) : nil
-      end
+      self.const_defined?(str, false) ? self.const_get(str, false) : nil
     end
   end
 
@@ -117,12 +114,12 @@ module Context
       end
     end
   end
-  
+
   def sorted_rubrics(user, context)
     associations = RubricAssociation.bookmarked.for_context_codes(context.asset_string).include_rubric
     associations.to_a.once_per(&:rubric_id).select{|r| r.rubric }.sort_by{|r| r.rubric.title || "zzzz" }
   end
-  
+
   def rubric_contexts(user)
     context_codes = [self.asset_string]
     context_codes << ([user] + user.management_contexts).uniq.map(&:asset_string) if user
@@ -145,7 +142,7 @@ module Context
     end
     contexts.sort_by{|c| codes_order[c[:context_code]] || 999 }
   end
-  
+
   def active_record_types
     @active_record_types ||= Rails.cache.fetch(['active_record_types', self].cache_key) do
       res = {}
@@ -160,7 +157,7 @@ module Context
       res
     end
   end
-  
+
   def allow_wiki_comments
     false
   end
@@ -171,9 +168,9 @@ module Context
     res = nil if res.respond_to?(:deleted?) && res.deleted?
     res
   end
-  
+
   def self.find_by_asset_string(string)
-    opts = string.split("_")
+    opts = string.split("_", -1)
     id = opts.pop
     if ContextTypes.const_defined?(opts.join('_').classify)
       type = ContextTypes.const_get(opts.join('_').classify)
@@ -184,7 +181,7 @@ module Context
   rescue => e
     nil
   end
-  
+
   def self.find_asset_by_asset_string(string, context=nil, allowed_types=nil)
     opts = string.split("_")
     id = opts.pop
@@ -208,7 +205,7 @@ module Context
   rescue => e
     nil
   end
-  
+
   def is_a_context?
     true
   end

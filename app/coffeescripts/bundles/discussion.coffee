@@ -1,9 +1,11 @@
 require [
+  'compiled/views/DiscussionTopic/EntryView'
   'compiled/models/DiscussionFilterState'
   'compiled/views/DiscussionTopic/DiscussionToolbarView'
   'compiled/views/DiscussionTopic/DiscussionFilterResultsView'
   'compiled/discussions/MarkAsReadWatcher'
   'jquery'
+  'underscore'
   'Backbone'
   'compiled/models/Entry'
   'compiled/models/Topic'
@@ -11,22 +13,22 @@ require [
   'compiled/collections/EntryCollection'
   'compiled/views/DiscussionTopic/TopicView'
   'compiled/views/DiscussionTopic/EntriesView'
-], (DiscussionFilterState, DiscussionToolbarView, DiscussionFilterResultsView, MarkAsReadWatcher, $, Backbone, Entry, MaterializedDiscussionTopic, SideCommentDiscussionTopic, EntryCollection, TopicView, EntriesView) ->
+  'compiled/jquery/sticky'
+], (EntryView, DiscussionFilterState, DiscussionToolbarView, DiscussionFilterResultsView, MarkAsReadWatcher, $, _, Backbone, Entry, MaterializedDiscussionTopic, SideCommentDiscussionTopic, EntryCollection, TopicView, EntriesView) ->
 
-  perPage     = 10
-  descendants = 3
-  children    = 3
+  descendants = 5
+  children    = 10
 
   ##
   # create the objects ...
   router        = new Backbone.Router
 
   @data         = if ENV.DISCUSSION.THREADED
-                    new MaterializedDiscussionTopic
+                    new MaterializedDiscussionTopic root_url: ENV.DISCUSSION.ROOT_URL
                   else
-                    new SideCommentDiscussionTopic
+                    new SideCommentDiscussionTopic root_url: ENV.DISCUSSION.ROOT_URL
 
-  entries       = new EntryCollection null, {perPage}
+  entries       = new EntryCollection null
 
   filterModel   = new DiscussionFilterState
 
@@ -52,41 +54,111 @@ require [
                     allData: data
                     model: filterModel
 
+  $container = $ window
+  $subentries = $ '#discussion_subentries'
+
+  scrollToTop = ->
+    $container.scrollTo $subentries, offset: -49
+
   ##
   # connect them ...
   data.on 'change', ->
-    entries.reset data.get 'entries'
+    entryData = data.get 'entries'
+    entries.options.per_page = entryData.length
+    entries.reset entryData
+
+  ##
+  # define function that syncs a discussion entry's
+  # read state back to the materialized view data.
+  updateMaterializedViewReadState = (id, read_state) ->
+    e = data.flattened[id]
+    e.read_state = read_state if e
+
+  ##
+  # propagate mark all read/unread changes to all views
+  setAllReadStateAllViews = (newReadState) ->
+    entries.setAllReadState(newReadState)
+    EntryView.setAllReadState(newReadState)
+    filterView.setAllReadState(newReadState)
 
   entriesView.on 'scrollAwayFromEntry', ->
-    $window = $ window
     # prevent scroll to top for non-pushstate browsers when hash changes
-    top = $window.scrollTop()
+    top = $container.scrollTop()
     router.navigate '',
       trigger: false
       replace: true
-    $window.scrollTo top
+    $container.scrollTo top
+
+  ##
+  # catch when an EntryView changes the read_state
+  # of a discussion entry and update the materialized view.
+  EntryView.on 'readStateChanged', (entry, view)->
+    updateMaterializedViewReadState(entry.get('id'), entry.get('read_state'))
+
+  ##
+  # catch when auto-mark-as-read watcher changes an entry
+  # and update the materialized view to match.
+  MarkAsReadWatcher.on 'markAsRead', (entry)->
+    updateMaterializedViewReadState(entry.get('id'), entry.get('read_state'))
+
+  ##
+  # detect when read_state changes on filtered model.
+  # sync the change to full view collections.
+  filterView.on 'readStateChanged', (id, read_state) ->
+    # update on materialized view
+    updateMaterializedViewReadState(id, read_state)
 
   filterView.on 'clickEntry', (entry) ->
     router.navigate "entry-#{entry.get 'id'}", yes
 
+  toolbarView.on 'expandAll', ->
+    EntryView.expandRootEntries()
+    scrollToTop()
+
+  toolbarView.on 'collapseAll', ->
+    EntryView.collapseRootEntries()
+    scrollToTop()
+
+  toolbarView.on 'markAllAsRead', ->
+    data.markAllAsRead()
+    setAllReadStateAllViews('read')
+
+  toolbarView.on 'markAllAsUnread', ->
+    data.markAllAsUnread()
+    setAllReadStateAllViews('unread')
+
+  filterView.on 'render', ->
+    scrollToTop()
+
+  filterView.on 'hide', ->
+    scrollToTop()
+
+  filterModel.on 'reset', -> EntryView.expandRootEntries()
+
+
   ##
   # routes
-  router.route '*catchall', 'catchall', -> router.navigate '', yes
   router.route 'entry-:id', 'id', entriesView.goToEntry
   router.route 'page-:page', 'page', (page) ->
     entriesView.render page
     # TODO: can get a little bouncy when the page isn't as tall as the previous
-    $(window).scrollTo '#discussion_subentries'
-  router.route '', 'root', entriesView.render
-  initEntries = ->
+    scrollToTop()
+  initEntries = (initial_entry) ->
     data.fetch success: ->
+      entriesView.render()
       Backbone.history.start
         pushState: yes
         root: ENV.DISCUSSION.APP_URL + '/'
+      if initial_entry
+        fetched_model = entries.get(initial_entry.id)
+        entries.remove(fetched_model) if fetched_model
+        entries.add(initial_entry)
+        entriesView.render()
+        router.navigate "entry-#{initial_entry.get 'id'}", yes
     topicView.on 'addReply', (entry) ->
       entries.add entry
       router.navigate "entry-#{entry.get 'id'}", yes
-    MarkAsReadWatcher.init()
+    MarkAsReadWatcher.init() unless ENV.DISCUSSION.MANUAL_MARK_AS_READ
 
   topicView.render()
   toolbarView.render()
@@ -94,8 +166,8 @@ require [
   ##
   # Get the party started
   if ENV.DISCUSSION.INITIAL_POST_REQUIRED
-    once = ->
-      initEntries()
+    once = (entry) ->
+      initEntries(entry)
       topicView.off 'addReply', once
     topicView.on 'addReply', once
   else

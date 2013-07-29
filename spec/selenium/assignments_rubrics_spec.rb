@@ -91,14 +91,13 @@ describe "assignment rubrics" do
       f('#rubric_dialog_'+@rubric.id.to_s+' .select_rubric_link').click
       wait_for_ajaximations
       f('#rubric_'+@rubric.id.to_s+' > thead .title').should include_text(@rubric.title)
-
     end
 
     it "should not adjust assignment points possible for grading rubric" do
       create_assignment_with_points(2)
 
       get "/courses/#{@course.id}/assignments/#{@assignment.id}"
-      f("#full_assignment .points_possible").text.should == '2'
+      f("#assignment_show .points_possible").text.should == '2'
 
       f('.add_rubric_link').click
       f('#grading_rubric').click
@@ -106,14 +105,14 @@ describe "assignment rubrics" do
       fj('.ui-dialog-buttonset .ui-button:contains("Leave different")').click
       wait_for_ajaximations
       f('#rubrics span .rubric_total').text.should == '5'
-      f("#full_assignment .points_possible").text.should == '2'
+      f("#assignment_show .points_possible").text.should == '2'
     end
 
     it "should adjust assignment points possible for grading rubric" do
       create_assignment_with_points(2)
 
       get "/courses/#{@course.id}/assignments/#{@assignment.id}"
-      f("#full_assignment .points_possible").text.should == '2'
+      f("#assignment_show .points_possible").text.should == '2'
 
       f('.add_rubric_link').click
       f('#grading_rubric').click
@@ -122,7 +121,7 @@ describe "assignment rubrics" do
       wait_for_ajaximations
 
       f('#rubrics span .rubric_total').text.should == '5'
-      f("#full_assignment .points_possible").text.should == '5'
+      f("#assignment_show .points_possible").text.should == '5'
     end
 
     it "should not allow XSS attacks through rubric descriptions" do
@@ -183,7 +182,7 @@ describe "assignment rubrics" do
       @submission = @assignment.submit_homework(@student, {:url => "http://www.instructure.com/"})
       @rubric.data[0][:ignore_for_scoring] = '1'
       @rubric.points_possible = 5
-      @rubric.instance_variable_set('@outcomes_changed', true)
+      @rubric.alignments_changed = true
       @rubric.save!
       @assignment.points_possible = 5
       @assignment.save!
@@ -195,7 +194,7 @@ describe "assignment rubrics" do
       f('.rubric_total').should include_text "5"
       f('.save_rubric_button').click
       wait_for_ajaximations
-      f('.grading_value').attribute(:value).should == "5"
+      f('.grading_value').should have_attribute(:value, '5')
     end
 
     def mark_rubric_for_grading(rubric, expect_confirmation)
@@ -277,20 +276,18 @@ describe "assignment rubrics" do
       course_with_designer_logged_in
     end
 
-    it "should allow an designer to create a course rubric" do
-      pending "Bug #7136 - Rubrics cannot be created by designers" do
-        rubric_name = 'this is a new rubric'
-        get "/courses/#{@course.id}/rubrics"
+    it "should allow a designer to create a course rubric" do
+      rubric_name = 'this is a new rubric'
+      get "/courses/#{@course.id}/rubrics"
 
-        expect {
-          f('.add_rubric_link').click
-          replace_content(f('.rubric_title input'), rubric_name)
-          submit_form('#edit_rubric_form')
-          wait_for_ajaximations
-        }.to change(Rubric, :count).by(1)
-        refresh_page
-        f('#rubrics .title').text.should == rubric_name
-      end
+      expect {
+        f('.add_rubric_link').click
+        replace_content(f('.rubric_title input'), rubric_name)
+        submit_form('#edit_rubric_form')
+        wait_for_ajaximations
+      }.to change(Rubric, :count).by(1)
+      refresh_page
+      f('#rubrics .title').text.should == rubric_name
     end
   end
 end

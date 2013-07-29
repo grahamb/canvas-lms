@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2012 Instructure, Inc.
+# Copyright (C) 2012 - 2013 Instructure, Inc.
 #
 # This file is part of Canvas.
 #
@@ -23,7 +23,18 @@ Rails.configuration.to_prepare do
   Canvas::AccountReports.add_account_reports 'default', 'Default', {
     'student_assignment_outcome_map_csv'=> {
       :title => 'Student Competency',
+      :parameters_partial => 'grade_export_csv_parameters',
       :description_partial => true,
+      :parameters => {
+        :enrollment_term => {
+          :required => false,
+          :description => 'The canvas id of the term of courses to report on'
+        },
+        :include_deleted => {
+          :required => false,
+          :description => 'Include deleted objects'
+        }
+      }
     },
     'grade_export_csv'=> {
       :title => 'Grade Export',
@@ -31,8 +42,12 @@ Rails.configuration.to_prepare do
       :parameters_partial => true,
       :parameters => {
         :enrollment_term => {
-          :required => true,
+          :required => false,
           :description => 'The canvas id of the term to get grades from'
+        },
+        :include_deleted => {
+          :required => false,
+          :description => 'Include deleted objects'
         }
       }
     },
@@ -68,6 +83,9 @@ Rails.configuration.to_prepare do
         :xlist => {
           :description => 'Get the SIS file for cross listed courses'
         },
+        :include_deleted => {
+          :description => 'Include deleted objects'
+        }
       }
     },
     'provisioning_csv'=> {
@@ -102,6 +120,31 @@ Rails.configuration.to_prepare do
         :xlist => {
           :description => 'Get the Provisioning file for cross listed courses'
         },
+        :include_deleted => {
+          :description => 'Include deleted objects'
+        }
+      }
+    },
+    'unpublished_courses_csv'=> {
+      :title => 'Unpublished Courses',
+      :description_partial => true,
+      :parameters_partial => 'term_selector_parameters',
+      :parameters => {
+        :enrollment_term => {
+          :required => false,
+          :description => 'The canvas id of the term to get grades from'
+        }
+      }
+    },
+    'recently_deleted_courses_csv'=> {
+      :title => 'Recently Deleted Courses',
+      :description_partial => true,
+      :parameters_partial => 'term_selector_parameters',
+      :parameters => {
+        :enrollment_term => {
+          :required => false,
+          :description => 'The canvas id of the term to get grades from'
+        }
       }
     }
   }

@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011 Instructure, Inc.
+# Copyright (C) 2011 - 2012 Instructure, Inc.
 #
 # This file is part of Canvas.
 #
@@ -25,6 +25,8 @@ class TestUserApi
   attr_accessor :services_enabled, :context, :current_user, :params, :request
   def service_enabled?(service); @services_enabled.include? service; end
   def avatar_image_url(*args); "avatar_image_url(#{args.first})"; end
+  def course_student_grades_url(course_id, user_id); ""; end
+  def course_user_url(course_id, user_id); ""; end
   def initialize
     @domain_root_account = Account.default
     @params = {}
@@ -102,6 +104,31 @@ describe Api::V1::User do
         }
     end
 
+    context "computed scores" do
+      before do
+        @enrollment.computed_current_score = 95.0;
+        @enrollment.computed_final_score = 85.0;
+        def @course.grading_standard_enabled?; true; end
+        @student1_enrollment = @enrollment
+        @student2 = course_with_student(:course => @course).user
+      end
+
+      it "should return scores as admin" do
+        json = @test_api.user_json(@student, @admin, {}, [], @course, [@student1_enrollment])
+        json['enrollments'].first['grades'].should == {
+          "html_url" => "",
+          "current_score" => 95.0,
+          "final_score" => 85.0,
+          "current_grade" => "A",
+          "final_grade" => "B",
+        }
+      end
+
+      it "should not return scores as another student" do
+        json = @test_api.user_json(@student, @student2, {}, [], @course, [@student1_enrollment])
+        json['enrollments'].first['grades'].keys.should == ["html_url"]
+      end
+    end
 
     def test_context(mock_context, context_to_pass)
       mock_context.expects(:account).returns(mock_context)
@@ -196,7 +223,6 @@ describe "Users API", :type => :integration do
     raw_api_call(:get, "/api/v1/users/#{@admin.id}/avatars",
                  :controller => "profile", :action => "profile_pics", :user_id => @admin.to_param, :format => 'json')
     response.status.should == "401 Unauthorized"
-    JSON.parse(response.body).should == {"status"=>"unauthorized", "message"=>"You are not authorized to perform that action."}
   end
 
   shared_examples_for "page view api" do
@@ -260,7 +286,7 @@ describe "Users API", :type => :integration do
         users << User.create!(:name => u[0])
         users[i].pseudonyms.create!(:unique_id => u[1], :account => @account) { |p| p.sis_user_id = u[1] }
       end
-      @account.all_users.scoped(:order => :sortable_name).each_with_index do |user, i|
+      @account.all_users.order(:sortable_name).each_with_index do |user, i|
         next unless users.find { |u| u == user }
         json = api_call(:get, "/api/v1/accounts/#{@account.id}/users",
                { :controller => 'users', :action => 'index', :account_id => @account.id.to_param, :format => 'json' },
@@ -268,7 +294,7 @@ describe "Users API", :type => :integration do
         json.should == [{
           'name' => user.name,
           'sortable_name' => user.sortable_name,
-          'sis_user_id' => user.sis_user_id,
+          'sis_user_id' => user.pseudonym.sis_user_id,
           'id' => user.id,
           'short_name' => user.short_name,
           'login_id' => user.pseudonym.unique_id,
@@ -293,6 +319,32 @@ describe "Users API", :type => :integration do
       @user    = @student
       raw_api_call(:get, "/api/v1/accounts/#{@account.id}/users", :controller => "users", :action => "index", :account_id => @account.id.to_param, :format => "json")
       response.code.should eql "401"
+    end
+
+    it "returns an error when search_term is fewer than 3 characters" do
+      @account = Account.default
+      json = api_call(:get, "/api/v1/accounts/#{@account.id}/users", { :controller => 'users', :action => "index", :format => 'json', :account_id => @account.id.to_param }, {:search_term => '12'}, {}, :expected_status => 400)
+      json["status"].should == "argument_error"
+      json["message"].should == "search_term of 3 or more characters is required"
+    end
+
+    it "returns a list of users filtered by search_term" do
+      @account = Account.default
+      expected_keys = %w{id name sortable_name short_name}
+
+      users = []
+      [['Test User1', 'test@example.com'], ['Test User2', 'test2@example.com'], ['Test User3', 'test3@example.com']].each_with_index do |u, i|
+        users << User.create!(:name => u[0])
+        users[i].pseudonyms.create!(:unique_id => u[1], :account => @account) { |p| p.sis_user_id = u[1] }
+      end
+
+      json = api_call(:get, "/api/v1/accounts/#{@account.id}/users", { :controller => 'users', :action => "index", :format => 'json', :account_id => @account.id.to_param }, {:search_term => 'test3@example.com'})
+
+      json.count.should == 1
+      json.each do |user|
+        (user.keys & expected_keys).sort.should == expected_keys.sort
+        users.map(&:id).should include(user['id'])
+      end
     end
   end
 
@@ -495,6 +547,59 @@ describe "Users API", :type => :integration do
     end
   end
 
+  describe "user settings" do
+    before do
+      course_with_student(active_all: true)
+      account_admin_user
+    end
+
+    let(:path) { "/api/v1/users/#{@student.to_param}/settings" }
+    let(:path_options) {
+      { controller: 'users', action: 'settings', format: 'json',
+        id: @student.to_param }
+    }
+
+    context "an admin user" do
+      it "should be able to view other users' settings" do
+        json = api_call(:get, path, path_options)
+        json['manual_mark_as_read'].should be_false
+      end
+
+      it "should be able to update other users' settings" do
+        json = api_call(:put, path, path_options, manual_mark_as_read: true)
+        json['manual_mark_as_read'].should be_true
+
+        json = api_call(:put, path, path_options, manual_mark_as_read: false)
+        json['manual_mark_as_read'].should be_false
+      end
+    end
+
+    context "a student" do
+      before do
+        @user = @student
+      end
+
+      it "should be able to view its own settings" do
+        json = api_call(:get, path, path_options)
+        json['manual_mark_as_read'].should be_false
+      end
+
+      it "should be able to update its own settings" do
+        json = api_call(:put, path, path_options, manual_mark_as_read: true)
+        json['manual_mark_as_read'].should be_true
+
+        json = api_call(:put, path, path_options, manual_mark_as_read: false)
+        json['manual_mark_as_read'].should be_false
+      end
+
+      it "should receive 401 if updating another user's settings" do
+        @course.enroll_student(user).accept!
+        raw_api_call(:put, path, path_options, manual_mark_as_read: true)
+        response.code.should == '401'
+      end
+    end
+  end
+
   describe "user deletion" do
     before do
       @admin = account_admin_user
@@ -521,7 +626,7 @@ describe "Users API", :type => :integration do
 
       it "should be able to delete a user by SIS ID" do
         @student.pseudonym.update_attribute(:sis_user_id, '12345')
-        id_param = "sis_user_id:#{@student.sis_user_id}"
+        id_param = "sis_user_id:#{@student.pseudonyms.first.sis_user_id}"
 
         path = "/api/v1/accounts/#{Account.default.id}/users/#{id_param}"
         path_options = @path_options.merge(:id => id_param)

@@ -84,7 +84,7 @@ describe "course copy" do
     end
   end
 
-  describe "course copy (through course 'copying')" do
+  describe "course copy through course copying" do
     it "should copy the course" do
       course_with_admin_logged_in
       @course.syllabus_body = "<p>haha</p>"
@@ -154,7 +154,7 @@ describe "course copy" do
     end
   end
 
-  describe "course copy (through course 'importing')" do
+  describe "course copy through course importing" do
     it "should copy course content" do
       course_copy_helper
       @course.wiki.wiki_pages.count.should == 5
@@ -283,7 +283,9 @@ describe "course copy" do
   end
 
   describe "course file imports" do
+
     before (:each) do
+      pending('193')
       course_with_teacher_logged_in(:course_code => 'first files course')
       @second_course = Course.create!(:name => 'second files course')
       @second_course.offer!

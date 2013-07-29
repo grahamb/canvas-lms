@@ -21,20 +21,21 @@ require File.expand_path(File.dirname(__FILE__) + '/../spec_helper.rb')
 describe AssignmentOverride do
   it "should soft-delete" do
     @override = assignment_override_model
+    @override.stubs(:assignment_override_students).once.returns stub(:destroy_all)
+    @override.expects(:save!).once
     @override.destroy
-    @override = AssignmentOverride.find_by_id(@override.id)
-    @override.should_not be_nil
+    AssignmentOverride.find_by_id(@override.id).should_not be_nil
     @override.workflow_state.should == 'deleted'
   end
 
   it "should default set_type to adhoc" do
-    @override = assignment_override_model
+    @override = AssignmentOverride.new
     @override.valid? # trigger bookkeeping
     @override.set_type.should == 'ADHOC'
   end
 
   it "should allow reading set_id and set when set_type is adhoc" do
-    @override = assignment_override_model
+    @override = AssignmentOverride.new
     @override.set_type = 'ADHOC'
     @override.set_id.should be_nil
     @override.set.should == []
@@ -128,7 +129,7 @@ describe AssignmentOverride do
     end
 
     def invalid_id_for_model(model)
-      (model.scoped(:select => 'max(id) as id').first.id || 0) + 1
+      (model.maximum(:id) || 0) + 1
     end
 
     it "should reject non-nil set_id with an adhoc set" do
@@ -233,6 +234,12 @@ describe AssignmentOverride do
       @override.set = @course.default_section
       @override.should be_valid
     end
+
+    it "is valid when the assignment is nil if it has a quiz" do
+      @override.assignment = nil
+      @override.quiz = quiz_model
+      @override.should be_valid
+    end
   end
 
   describe "title" do
@@ -302,7 +309,7 @@ describe AssignmentOverride do
     end
 
     before :each do
-      @override = assignment_override_model
+      @override = AssignmentOverride.new
     end
 
     it "should interpret 11:59pm as all day with no prior value" do
@@ -378,10 +385,43 @@ describe AssignmentOverride do
     end
 
     it "should preserve non-all-day date when only changing time zone" do
-      @override.due_at = Date.today.in_time_zone('Alaska') - 11.hours # 13:00:00 AKDT -08:00 previous day
-      @override.due_at = @override.due_at.in_time_zone('Baghdad') # 00:00:00 AST +03:00 today
-      @override.all_day_date.should == Date.today - 1.day
+      Timecop.freeze(Time.utc(2013,3,10,0,0)) do
+        @override.due_at = Date.today.in_time_zone('Alaska') - 11.hours # 13:00:00 AKDT -08:00 previous day
+        @override.due_at = @override.due_at.in_time_zone('Baghdad') # 00:00:00 AST +03:00 today
+        @override.all_day_date.should == Date.today - 1.day
+      end
     end
+
+    it "sets the date to 11:59 PM of the same day when the date is 12:00 am" do
+      @override.due_at = Date.today.in_time_zone('Alaska').midnight
+      @override.due_at.should == Date.today.in_time_zone('Alaska').end_of_day
+    end
+
+    it "sets the date to the date given when date is not 12:00 AM" do
+      expected_time = Date.today.in_time_zone('Alaska') - 11.hours
+      @override.unlock_at = expected_time
+      @override.unlock_at.should == expected_time
+    end
+  end
+
+  describe "#lock_at=" do
+    before do
+      @override = AssignmentOverride.new
+    end
+
+    it "sets the date to 11:59 PM of the same day when the date is 12:00 AM" do
+      @override.lock_at = Date.today.in_time_zone('Alaska').midnight
+      @override.lock_at.should == Date.today.in_time_zone('Alaska').end_of_day
+    end
+
+    it "sets the date to the date given when date is not 12:00 AM" do
+      expected_time = Date.today.in_time_zone('Alaska') - 11.hours
+      @override.lock_at = expected_time
+      @override.lock_at.should == expected_time
+      @override.lock_at = nil
+      @override.lock_at.should be_nil
+    end
+
   end
 
   describe "visible_to named scope" do
@@ -480,6 +520,182 @@ describe AssignmentOverride do
       visible_overrides.size.should == 2
       visible_overrides.should include @override1
       visible_overrides.should include @override2
+    end
+
+    it "should not return readonly objects" do
+      section = @course.default_section
+      override = assignment_override_model(:assignment => @assignment)
+      override.set = section
+      override.save!
+
+      override = AssignmentOverride.visible_to(@teacher, @course).first
+      override.should_not be_nil
+      override.should_not be_readonly
+    end
+  end
+
+  describe "default_values" do
+    let(:override) { AssignmentOverride.new }
+    let(:quiz) { Quiz.new }
+    let(:assignment) { Assignment.new }
+
+    context "when the override belongs to a quiz" do
+      before do
+        override.quiz = quiz
+      end
+
+      context "that has an assignment" do
+        it "uses the quiz's assignment" do
+          override.quiz.assignment = assignment
+          override.send(:default_values)
+          override.assignment.should == assignment
+        end
+      end
+
+      context "that has no assignment" do
+        it "has a nil assignment" do
+          override.send(:default_values)
+          override.assignment.should be_nil
+        end
+      end
+    end
+
+    context "when the override belongs to an assignment" do
+      before do
+        override.assignment = assignment
+      end
+
+      context "that has a quiz" do
+        it "uses the assignment's quiz" do
+          override.assignment.quiz = quiz
+          override.send(:default_values)
+          override.quiz.should == quiz
+        end
+      end
+
+      context "that has no quiz" do
+        it "has a nil quiz" do
+          override.send(:default_values)
+          override.quiz.should be_nil
+        end
+      end
+    end
+  end
+
+  describe "updating cached due dates" do
+    before do
+      @override = assignment_override_model
+      @override.override_due_at(3.days.from_now)
+      @override.save
+    end
+
+    it "triggers when applicable override is created" do
+      DueDateCacher.expects(:recompute).with(@assignment)
+      new_override = @assignment.assignment_overrides.build
+      new_override.title = 'New Override'
+      new_override.override_due_at(3.days.from_now)
+      new_override.save!
+    end
+
+    it "triggers when overridden due_at changes" do
+      DueDateCacher.expects(:recompute).with(@assignment)
+      @override.override_due_at(5.days.from_now)
+      @override.save
+    end
+
+    it "triggers when overridden due_at changes to nil" do
+      DueDateCacher.expects(:recompute).with(@assignment)
+      @override.override_due_at(nil)
+      @override.save
+    end
+
+    it "triggers when due_at_overridden changes" do
+      DueDateCacher.expects(:recompute).with(@assignment)
+      @override.clear_due_at_override
+      @override.save
+    end
+
+    it "triggers when applicable override deleted" do
+      DueDateCacher.expects(:recompute).with(@assignment)
+      @override.destroy
+    end
+
+    it "triggers when applicable override undeleted" do
+      @override.destroy
+
+      DueDateCacher.expects(:recompute).with(@assignment)
+      @override.workflow_state = 'active'
+      @override.save
+    end
+
+    it "does not trigger when non-applicable override is created" do
+      DueDateCacher.expects(:recompute).never
+      @assignment.assignment_overrides.create
+    end
+
+    it "does not trigger when non-applicable override deleted" do
+      @override.clear_due_at_override
+      @override.save
+
+      DueDateCacher.expects(:recompute).never
+      @override.destroy
+    end
+
+    it "does not trigger when non-applicable override undeleted" do
+      @override.clear_due_at_override
+      @override.destroy
+
+      DueDateCacher.expects(:recompute).never
+      @override.workflow_state = 'active'
+      @override.save
+    end
+
+    it "does not trigger when nothing changed" do
+      DueDateCacher.expects(:recompute).never
+      @override.save
+    end
+  end
+
+  describe "as_hash" do
+    let(:due_at) { Time.utc(2013,1,10,12,30) }
+    let(:unlock_at) { Time.utc(2013,1,9,12,30) }
+    let(:lock_at) { Time.utc(2013,1,11,12,30) }
+    let(:title) { "My Wonderful VDD" }
+    let(:override) do
+      override = AssignmentOverride.new
+      override.title = title
+      override.due_at = due_at
+      override.all_day = due_at
+      override.all_day_date = due_at.to_date
+      override.lock_at = lock_at
+      override.unlock_at = unlock_at
+      override
+    end
+
+    let(:hash) { override.as_hash }
+
+    it "includes the title" do
+      hash[:title].should == title
+    end
+
+    it "includes the due_at" do
+      hash[:due_at].should == due_at
+    end
+
+    it "includes the all_day" do
+      hash[:all_day].should == override.all_day
+    end
+
+    it "includes the all_day_date" do
+      hash[:all_day_date].should == override.all_day_date
+    end
+
+    it "includes the unlock_at" do
+      hash[:unlock_at].should == unlock_at
+    end
+
+    it "includes the lock_at" do
+      hash[:lock_at].should == lock_at
     end
   end
 end

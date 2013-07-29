@@ -40,7 +40,24 @@ module DashboardHelper
 
   def show_welcome_message?
     @current_user.present? &&
-      @current_user.cached_current_enrollments(:include_enrollment_uuid => session[:enrollment_uuid]).empty?
+      @current_user.cached_current_enrollments(:include_enrollment_uuid => session[:enrollment_uuid]).select(&:active?).empty?
+  end
+
+  def welcome_message
+    if @current_user.cached_current_enrollments(:include_future => true).present?
+      t('#users.welcome.unpublished_courses_message', <<-BODY)
+        You've enrolled in one or more courses that have not started yet. Once
+        those courses are available, you will see information about them here
+        and in the top navigation. In the meantime, feel free to sign up for
+        more courses or set up your profile.
+      BODY
+    else
+      t('#users.welcome.no_courses_message', <<-BODY)
+        You don't have any courses, so this page won't be very exciting for now.
+        Once you've created or signed up for courses, you'll start to see
+        conversations from all of your classes.
+      BODY
+    end
   end
 
   def activity_category_links(category, items)
@@ -55,6 +72,7 @@ module DashboardHelper
     end
 
     contexts.map do |name, url|
+      url = nil if category == 'Conversation'
       url.present? ? "<a href=\"#{url}\">#{h(name)}</a>" : h(name)
     end.to_sentence.html_safe
   end

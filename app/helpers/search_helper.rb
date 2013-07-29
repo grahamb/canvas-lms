@@ -55,7 +55,7 @@ module SearchHelper
             :name => section.name,
             :type => :section,
             :term => contexts[:courses][section.course_id][:term],
-            :state => contexts[:courses][section.course_id][:state],
+            :state => section.active? ? :active : :inactive,
             :parent => {:course => section.course_id},
             :context_name =>  contexts[:courses][section.course_id][:name]
             # if we decide to return permissions here, we should ensure those
@@ -84,10 +84,9 @@ module SearchHelper
         add_sections.call context.course_sections
         add_groups.call context.groups
       else
-        add_courses.call @current_user.concluded_courses, :concluded
-        add_courses.call @current_user.courses, :current
-        section_ids = @current_user.enrollment_visibility[:section_user_counts].keys
-        add_sections.call CourseSection.where({:id => section_ids}) if section_ids.present?
+        add_courses.call @current_user.concluded_courses.with_each_shard, :concluded
+        add_courses.call @current_user.courses.with_each_shard, :current
+        add_sections.call @current_user.messageable_sections
         add_groups.call @current_user.messageable_groups
       end
       contexts
@@ -95,7 +94,7 @@ module SearchHelper
     permissions = options[:permissions] || []
     @contexts.each do |type, contexts|
       contexts.each do |id, context|
-        context[:permissions] ||= {}
+        context[:permissions] = HashWithIndifferentAccess.new(context[:permissions] || {})
         context[:permissions].slice!(*permissions) unless permissions == :all
       end
     end

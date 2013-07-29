@@ -37,7 +37,7 @@ describe "site-wide" do
   end
 
   it "should set the x-ua-compatible http header" do
-    get "/"
+    get "/login"
     response['x-ua-compatible'].should == "IE=edge,chrome=1"
   end
 
@@ -60,8 +60,10 @@ describe "site-wide" do
   end
 
   it "should not set x-frame-options when on a files domain" do
+    user_session user(:active_all => true)
+    attachment_model(:context => @user)
     FilesController.any_instance.expects(:files_domain?).returns(true)
-    get "http://files-test.host/files/1/download"
+    get "http://files-test.host/files/#{@attachment.id}/download"
     response['x-frame-options'].should be_nil
   end
 
@@ -99,6 +101,19 @@ describe "site-wide" do
       get "/"
       response['x-canvas-user-id'].should == @student.global_id.to_s
       response['x-canvas-real-user-id'].should == @admin.global_id.to_s
+    end
+  end
+
+  context "breadcrumbs" do
+    it "should be absent for error pages" do
+      get "/apagethatdoesnotexist"
+      response.body.should_not match(%r{id="breadcrumbs"})
+    end
+
+    it "should be absent for error pages with user info" do
+      course_with_teacher
+      get "/users/#{@user.id}/files/apagethatdoesnotexist"
+      response.body.to_s.should_not match(%r{id="breadcrumbs"})
     end
   end
 end

@@ -36,14 +36,30 @@ define([
       $(this).val(date);
     });
     $("#add_notification_form").submit(function(event) {
-      var result = $(this).validateForm({
+      var $this = $(this);
+      var $confirmation = $this.find('#confirm_global_announcement:visible:not(:checked)');
+      if ($confirmation.length > 0) {
+        $confirmation.errorBox(I18n.t('confirms.global_announcement', "You must confirm the global announcement"));
+        return false;
+      }
+      var validations = {
         object_name: 'account_notification',
         required: ['start_at', 'end_at', 'subject', 'message'],
-        date_fields: ['start_at', 'end_at']
-      });
+        date_fields: ['start_at', 'end_at'],
+        numbers: []
+      };
+      if ($('#account_notification_months_in_display_cycle').length > 0) {
+        validations.numbers.push('months_in_display_cycle');
+      }
+      var result = $this.validateForm(validations);
       if(!result) {
         return false;
       }
+    });
+    $("#account_notification_required_account_service").click(function(event) {
+      $this = $(this);
+      $("#confirm_global_announcement_field").showIf(!$this.is(":checked"));
+      $("#account_notification_months_in_display_cycle").prop("disabled", !$this.is(":checked"));
     });
     $(".delete_notification_link").click(function(event) {
       event.preventDefault();
@@ -99,6 +115,15 @@ define([
       });
     });
 
+    $('#account_settings_external_notification_warning_checkbox').on('change', function(e) {
+      $('#account_settings_external_notification_warning').val($(this).prop('checked') ? 1 : 0);
+    });
+
+    $(".custom_help_link .delete").click(function(event) {
+      event.preventDefault();
+      $(this).parents(".custom_help_link").find(".custom_help_link_state").val('deleted');
+      $(this).parents(".custom_help_link").hide();
+    });
 
     var $blankCustomHelpLink = $('.custom_help_link.blank').detach().removeClass('blank'),
         uniqueCounter = 1000;
@@ -113,10 +138,6 @@ define([
           return previous.replace(/\d+/, newId);
         });
       });
-    });
-    $(".custom_help_link .delete").click(function(event) {
-      event.preventDefault();
-      $(this).parents(".custom_help_link").remove();
     });
 
     $(".remove_account_user_link").click(function(event) {
@@ -231,7 +252,7 @@ define([
         width: 560
       });
 
-      $('<a class="help" href="#">&nbsp;</a>')
+      $('<a href="#"><i class="icon-question standalone-icon"></i></a>')
         .click(function(event){
           event.preventDefault();
           $dialog.dialog('open');

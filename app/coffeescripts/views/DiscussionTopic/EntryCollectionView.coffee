@@ -16,7 +16,7 @@ define [
       displayShowMore: true
 
       # maybe make a sub-class for threaded discussions if the branching gets
-      # out of control
+      # out of control. UPDATE: it is out of control
       threaded: false
 
       # its collection represents the root of the discussion, should probably
@@ -29,10 +29,6 @@ define [
     template: template
 
     els: '.discussion-entries': 'list'
-
-    initialize: ->
-      super
-      @attach()
 
     attach: ->
       @collection.on 'reset', @addAll
@@ -52,7 +48,9 @@ define [
         children: @collection.options.perPage
         showMoreDescendants: @options.showMoreDescendants
         threaded: @options.threaded
+        collapsed: @options.collapsed
       view.render()
+      entry.on('change:editor', @nestEntries)
       return @addNewView view if entry.get 'new'
       if @options.descendants
         view.renderTree()
@@ -62,6 +60,13 @@ define [
         @list.prepend view.el
       else
         @list.append view.el
+      @nestEntries()
+
+    nestEntries: ->
+      $('.entry_content[data-should-position]').each ->
+        $el    = $(this)
+        offset = ($el.parents('li.entry').length - 1) * 30
+        $el.css('padding-left', offset).removeAttr('data-should-position')
 
     addNewView: (view) ->
       view.model.set 'new', false
@@ -69,6 +74,7 @@ define [
         @list.prepend view.el
       else
         @list.append view.el
+      @nestEntries()
       if not @options.root
         view.$el.hide()
         setTimeout =>
@@ -90,7 +96,10 @@ define [
       @nextLink = $ '<div/>'
       showMore = true
       if not @options.threaded
-        moreText = I18n.t('show_all_n_replies', {one: "Show one reply", other: "Show all %{count} replies"}, {count: stats.total})
+        moreText = I18n.t 'show_all_n_replies',
+          one: "Show one reply"
+          other: "Show all %{count} replies"
+          {count: stats.total + @collection.options.perPage}
       @nextLink.html entryStats({stats, moreText, showMore: yes})
       @nextLink.addClass 'showMore loadNext'
       if @options.threaded
@@ -121,7 +130,7 @@ define [
       if @options.threaded
         @collection.add @collection.fullCollection.getPage 'next'
       else
-        @collection.reset @collection.fullCollection.toJSON()
+        @collection.reset @collection.fullCollection.toArray()
       @renderNextLink()
 
     filter: @::afterRender

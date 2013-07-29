@@ -50,11 +50,11 @@ class SubmissionsApiController < ApplicationController
   # preview_url:: Link to the URL in canvas where the submission can be previewed. This will require the user to log in.
   # submitted_at:: Timestamp when the submission was made.
   # url:: If the submission was made as a URL.
+  # late:: Whether the submission was made after the applicable due date.
   def index
     if authorized_action(@context, @current_user, [:manage_grades, :view_all_grades])
       @assignment = @context.assignments.active.find(params[:assignment_id])
-      @submissions = @assignment.submissions.all(
-        :conditions => { :user_id => visible_user_ids })
+      @submissions = @assignment.submissions.where(:user_id => visible_user_ids).all
 
       includes = Array(params[:include])
 
@@ -102,7 +102,7 @@ class SubmissionsApiController < ApplicationController
       assignment_scope = @context.assignments.active
       requested_assignment_ids = Array(params[:assignment_ids]).map(&:to_i)
       if requested_assignment_ids.present?
-        assignment_scope = assignment_scope.scoped(:conditions => { 'assignments.id' => requested_assignment_ids })
+        assignment_scope = assignment_scope.where('assignments.id' => requested_assignment_ids)
       end
       assignments = assignment_scope.all
       assignments_hash = {}
@@ -112,9 +112,9 @@ class SubmissionsApiController < ApplicationController
       Api.assignment_ids_for_students_api = assignments.map(&:id)
       sql_includes = { :user => [] }
       sql_includes[:user] << :submissions_for_given_assignments unless assignments.empty?
-      scope = (@section || @context).all_student_enrollments.scoped(
-        :include => sql_includes,
-        :conditions => { 'users.id' => student_ids })
+      scope = (@section || @context).all_student_enrollments.
+          includes(sql_includes).
+          where('users.id' => student_ids)
 
       result = scope.map do |enrollment|
         student = enrollment.user
@@ -148,7 +148,7 @@ class SubmissionsApiController < ApplicationController
   # @argument include[] ["submission_history"|"submission_comments"|"rubric_assessment"] Associations to include with the group.
   def show
     @assignment = @context.assignments.active.find(params[:assignment_id])
-    @user = get_user_considering_section(params[:id])
+    @user = get_user_considering_section(params[:user_id])
     @submission = @assignment.submission_for_student(@user)
 
     if authorized_action(@submission, @current_user, :read)
@@ -250,7 +250,7 @@ class SubmissionsApiController < ApplicationController
   #       rubric_assessment[crit1][points]=3&rubric_assessment[crit2][points]=5&rubric_assessment[crit2][comments]=Well%20Done.
   def update
     @assignment = @context.assignments.active.find(params[:assignment_id])
-    @user = get_user_considering_section(params[:id])
+    @user = get_user_considering_section(params[:user_id])
 
     authorized = false
     if params[:submission] || params[:rubric_assessment]
@@ -287,8 +287,10 @@ class SubmissionsApiController < ApplicationController
 
       comment = params[:comment]
       if comment.is_a?(Hash)
+        admin_in_context = !@context_enrollment || @context_enrollment.admin?
         comment = {
-          :comment => comment[:text_comment], :author => @current_user }.merge(
+          :comment => comment[:text_comment], :author => @current_user,
+          :hidden => @assignment.muted? && admin_in_context }.merge(
           comment.slice(:media_comment_id, :media_comment_type, :group_comment)
         ).with_indifferent_access
         @assignment.update_submission(@submission.user, comment)
@@ -311,7 +313,7 @@ class SubmissionsApiController < ApplicationController
   def get_user_considering_section(user_id)
     scope = @context.students_visible_to(@current_user)
     if @section
-      scope = scope.scoped(:conditions => { 'enrollments.course_section_id' => @section.id })
+      scope = scope.where(:enrollments => { :course_section_id => @section })
     end
     api_find(scope, user_id)
   end
@@ -321,6 +323,6 @@ class SubmissionsApiController < ApplicationController
       opts[:section_ids] = [@section.id]
     end
     scope = @context.enrollments_visible_to(@current_user, opts)
-    scope.all(:select => :user_id).map(&:user_id)
+    scope.pluck(:user_id)
   end
 end

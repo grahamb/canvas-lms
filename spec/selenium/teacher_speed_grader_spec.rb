@@ -1,7 +1,16 @@
 require File.expand_path(File.dirname(__FILE__) + '/helpers/speed_grader_common')
 
 describe "speed grader" do
-  it_should_behave_like "speed grader tests"
+  it_should_behave_like "in-process server selenium tests"
+
+  before (:each) do
+    stub_kaltura
+
+    course_with_teacher_logged_in
+    outcome_with_rubric
+    @assignment = @course.assignments.create(:name => 'assignment with rubric', :points_possible => 10)
+    @association = @rubric.associate_with(@assignment, @course, :purpose => 'grading')
+  end
 
   context "as a course limited ta" do
     before(:each) do
@@ -195,11 +204,11 @@ describe "speed grader" do
     f('#rubric_summary_container').should include_text(@rubric.title)
     f('#rubric_summary_container .rubric_total').should include_text('8')
     wait_for_ajaximations
-    f('#grade_container input').attribute(:value).should == "8"
+    f('#grade_container input').should have_attribute(:value, '8')
   end
 
   it "should create a comment on assignment" do
-    pending("failing because it is dependant on an external kaltura system")
+    #pending("failing because it is dependant on an external kaltura system")
 
     student_submission
     get "/courses/#{@course.id}/gradebook/speed_grader?assignment_id=#{@assignment.id}"
@@ -227,7 +236,9 @@ describe "speed grader" do
     f('#comments > .comment').should include_text('grader comment')
 
     #make sure gradebook link works
-    f('#x_of_x_students a').click
+    expect_new_page_load do
+      f('#speed_grader_gradebook_link').click
+    end
     fj('body.grades').should be_displayed
   end
 
@@ -291,7 +302,7 @@ describe "speed grader" do
     ff("#comments > .comment .avatar")[0].should have_attribute('style', "display: none\;")
   end
 
-  it "should hide student names and avatar images if \"Hide student names\" is checked" do
+  it "should hide student names and avatar images if Hide student names is checked" do
     # enable avatars
     @account = Account.default
     @account.enable_service(:avatars)
@@ -307,10 +318,12 @@ describe "speed grader" do
     f("#settings_link").click
     f('#hide_student_names').click
     expect_new_page_load { fj('.ui-dialog-buttonset .ui-button:visible:last').click }
-    wait_for_animations
+    wait_for_ajaximations
 
-    f("#avatar_image").should_not be_displayed
-    f('#combo_box_container .ui-selectmenu .ui-selectmenu-item-header').text.should == "Student 1"
+    keep_trying_until do
+      f("#avatar_image").should_not be_displayed
+      fj('#students_selectmenu-button .ui-selectmenu-item-header').text.should == "Student 1"
+    end
 
     f('#comments > .comment').should include_text('ohai')
     f("#comments > .comment .avatar").should_not be_displayed
@@ -419,7 +432,7 @@ describe "speed grader" do
                                        :learning_outcome_id => @ignored.id,
                                        :ignore_for_scoring => '1',
                                    }]
-    @rubric.instance_variable_set('@outcomes_changed', true)
+    @rubric.alignments_changed = true
     @rubric.save!
 
     get "/courses/#{@course.id}/gradebook/speed_grader?assignment_id=#{@assignment.id}"
@@ -431,7 +444,7 @@ describe "speed grader" do
     wait_for_ajaximations
 
     @submission.reload.score.should == 3
-    f("#grade_container input[type=text]").attribute(:value).should == '3'
+    f("#grade_container input[type=text]").should have_attribute(:value, '3')
     f("#rubric_summary_container tr:nth-child(1) .editing").should be_displayed
     f("#rubric_summary_container tr:nth-child(1) .ignoring").should_not be_displayed
     f("#rubric_summary_container tr:nth-child(3) .editing").should_not be_displayed
@@ -441,7 +454,7 @@ describe "speed grader" do
     # check again that initial page load has the same data.
     get "/courses/#{@course.id}/gradebook/speed_grader?assignment_id=#{@assignment.id}"
     wait_for_ajaximations
-    f("#grade_container input[type=text]").attribute(:value).should == '3'
+    f("#grade_container input[type=text]").should have_attribute(:value, '3')
     f("#rubric_summary_container tr:nth-child(1) .editing").should be_displayed
     f("#rubric_summary_container tr:nth-child(1) .ignoring").should_not be_displayed
     f("#rubric_summary_container tr:nth-child(3) .editing").should_not be_displayed

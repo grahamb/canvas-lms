@@ -126,6 +126,7 @@ class CommunicationChannelsController < ApplicationController
     end
 
     @cc.user = @user
+    @cc.re_activate! if @cc.retired?
     @cc.workflow_state = skip_confirmation ? 'active' : 'unconfirmed'
     @cc.build_pseudonym_on_confirm = params[:build_pseudonym].to_i > 0
 
@@ -204,12 +205,14 @@ class CommunicationChannelsController < ApplicationController
       end
       @merge_opportunities.sort! { |a, b| [a.first == @current_user ? 0 : 1, a.first.name] <=> [b.first == @current_user ? 0 : 1, b.first.name] }
 
+      js_env :PASSWORD_POLICY => @domain_root_account.password_policy
+
       if @current_user && params[:confirm].present? && @merge_opportunities.find { |opp| opp.first == @current_user }
         @user.transaction do
           @current_user.transaction do
             cc.confirm
             @enrollment.accept if @enrollment
-            @user.move_to_user(@current_user) if @user != @current_user
+            UserMerge.from(@user).into(@current_user) if @user != @current_user
             # create a new pseudonym if necessary and possible
             pseudonym = @current_user.find_or_initialize_pseudonym_for_account(@root_account, @domain_root_account)
             pseudonym.save! if pseudonym && pseudonym.changed?
@@ -243,7 +246,7 @@ class CommunicationChannelsController < ApplicationController
       else
         # Open registration and admin-created users are pre-registered, and have already claimed a CC, but haven't
         # set up a password yet
-        @pseudonym = @root_account.pseudonyms.active.find(:first, :conditions => {:password_auto_generated => true, :user_id => @user.id} ) if @user.pre_registered? || @user.creation_pending?
+        @pseudonym = @root_account.pseudonyms.active.where(:password_auto_generated => true, :user_id => @user).first if @user.pre_registered? || @user.creation_pending?
         # Users implicitly created via course enrollment or account admin creation are creation pending, and don't have a pseudonym yet
         @pseudonym ||= @root_account.pseudonyms.build(:user => @user, :unique_id => cc.path) if @user.creation_pending?
         # We create the pseudonym with unique_id = cc.path, but if that unique_id is taken, just nil it out and make the user come
@@ -258,6 +261,7 @@ class CommunicationChannelsController < ApplicationController
           if Canvas.redis_enabled? && @merge_opportunities.length == 1
             Canvas.redis.rpush('single_user_registered_new_account_stats', {:user_id => @user.id, :registered_at => Time.now.utc }.to_json)
           end
+          @user.require_acceptance_of_terms = require_terms?
           @user.attributes = params[:user]
           @pseudonym.attributes = params[:pseudonym]
           @pseudonym.communication_channel = cc
@@ -266,7 +270,14 @@ class CommunicationChannelsController < ApplicationController
           @pseudonym.require_password = true
           @pseudonym.password_confirmation = @pseudonym.password = params[:pseudonym][:password] if params[:pseudonym]
 
-          return unless @pseudonym.valid?
+          unless @pseudonym.valid? && @user.valid?
+            return render :json => {
+                            :errors => {
+                              :user => @user.errors.as_json[:errors],
+                              :pseudonym => @pseudonym.errors.as_json[:errors]
+                            }
+                          }, :status => :bad_request
+          end
 
           # They may have switched e-mail address when they logged in; create a CC if so
           if @pseudonym.unique_id != cc.path
@@ -311,7 +322,7 @@ class CommunicationChannelsController < ApplicationController
       flash[:notice] = t 'notices.registration_confirmed', "Registration confirmed!"
       respond_to do |format|
         format.html { @enrollment ? redirect_to(course_url(@course)) : redirect_back_or_default(dashboard_url) }
-        format.json { render :json => cc.to_json(:except => [:confirmation_code] ) }
+        format.json { render :json => {:url => @enrollment ? course_url(@course) : dashboard_url} }
       end
     end
   end
@@ -344,6 +355,9 @@ class CommunicationChannelsController < ApplicationController
     @cc   = @user.communication_channels.find(params[:id]) if params[:id]
 
     return render_unauthorized_action unless has_api_permissions?
+    if @cc.imported? && !@domain_root_account.edit_institution_email?
+      return render_unauthorized_action
+    end
 
     if @cc.nil? || @cc.destroy
       @user.touch
@@ -362,4 +376,10 @@ class CommunicationChannelsController < ApplicationController
     @user == @current_user ||
       @user.grants_right?(@current_user, session, :manage_user_details)
   end
+
+  def require_terms?
+    # a plugin could potentially set this
+    @require_terms
+  end
+  helper_method :require_terms?
 end

@@ -31,7 +31,7 @@ class EportfoliosController < ApplicationController
     @active_tab = "eportfolios"
     add_crumb(@current_user.short_name, user_profile_url(@current_user))
     add_crumb(t(:crumb, "ePortfolios"))
-    @portfolios = @current_user.eportfolios.active.find(:all, :order => :updated_at)
+    @portfolios = @current_user.eportfolios.active.order(:updated_at).all
     render :action => 'user_index'
   end
   
@@ -76,8 +76,10 @@ class EportfoliosController < ApplicationController
       end
       @show_left_side = true
       eportfolio_page_attributes
-      js_env :folder_id => Folder.unfiled_folder(@current_user).id,
-             :context_code => @current_user.asset_string
+      if @current_user
+        js_env :folder_id => Folder.unfiled_folder(@current_user).id,
+               :context_code => @current_user.asset_string
+      end
       render :template => "eportfolios/show"
     end
   end
@@ -148,7 +150,7 @@ class EportfoliosController < ApplicationController
     zip_filename = "eportfolio.zip"
     @portfolio = Eportfolio.find(params[:eportfolio_id])
     if authorized_action(@portfolio, @current_user, :update)
-      @attachments = @portfolio.attachments.find_all_by_display_name(zip_filename).select{|a| ['to_be_zipped', 'zipping', 'zipped'].include?(a.workflow_state) }.sort_by{|a| a.created_at }
+      @attachments = @portfolio.attachments.find_all_by_display_name(zip_filename).select{|a| ['to_be_zipped', 'zipping', 'zipped', 'unattached'].include?(a.workflow_state) }.sort_by{|a| a.created_at }
       @attachment = @attachments.pop
       @attachments.each{|a| a.destroy! }
       if @attachment && (@attachment.created_at < 1.hour.ago || @attachment.created_at < (@portfolio.eportfolio_entries.map{|s| s.updated_at}.compact.max || @attachment.created_at))
@@ -189,7 +191,7 @@ class EportfoliosController < ApplicationController
   def public_feed
     @portfolio = Eportfolio.find(params[:eportfolio_id])
     if @portfolio.public || params[:verifier] == @portfolio.uuid
-      @entries = @portfolio.eportfolio_entries.find(:all, :order => 'eportfolio_entries.created_at DESC')
+      @entries = @portfolio.eportfolio_entries.order('eportfolio_entries.created_at DESC').all
       feed = Atom::Feed.new do |f|
         f.title = t(:title, "%{portfolio_name} Feed", :portfolio_name => @portfolio.name)
         f.links << Atom::Link.new(:href => eportfolio_url(@portfolio.id), :rel => 'self')

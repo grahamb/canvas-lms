@@ -781,11 +781,11 @@ describe "security" do
         response.should be_success
       end
 
-      it "manage_jobs" do
+      it "view_jobs" do
         get "/jobs"
         response.should be_redirect
 
-        add_permission :manage_jobs
+        add_permission :view_jobs
 
         get "/jobs"
         response.should be_success
@@ -883,7 +883,6 @@ describe "security" do
         response.should be_success
         response.body.should_not match /View User Groups/
         response.body.should match /View Prior Enrollments/
-        response.body.should match /Manage Users/
 
         get "/courses/#{@course.id}/users/prior"
         response.should be_success
@@ -896,7 +895,6 @@ describe "security" do
         response.body.should match /People/
         html = Nokogiri::HTML(response.body)
         html.css('#tab-users').should_not be_empty
-        html.css('.add_users_link').should_not be_empty
 
         @course.tab_configuration = [ { :id => Course::TAB_PEOPLE, :hidden => true } ]
         @course.save!
@@ -926,7 +924,7 @@ describe "security" do
 
       it 'read_course_content' do
         @course.assignments.create!
-        @course.wiki.wiki_page.save!
+        @course.wiki.front_page.save!
         @course.quizzes.create!
         @course.attachments.create!(:uploaded_data => default_uploaded_data)
 
@@ -1122,6 +1120,28 @@ describe "security" do
 
         delete "/courses/#{@course.id}", :event => 'conclude'
         response.status.should == '401 Unauthorized'
+      end
+
+      it 'view_statistics' do
+        course_with_teacher_logged_in(:active_all => 1)
+
+        @student = user :active_all => true
+        @course.enroll_student(@student).tap do |e|
+          e.workflow_state = 'active'
+          e.save!
+        end
+
+        get "/courses/#{@course.id}/users/#{@student.id}"
+        response.should be_success
+
+        get "/users/#{@student.id}"
+        response.status.should == '401 Unauthorized'
+
+        admin = account_admin_user :account => Account.site_admin
+        user_session(admin)
+
+        get "/users/#{@student.id}"
+        response.should be_success
       end
     end
   end

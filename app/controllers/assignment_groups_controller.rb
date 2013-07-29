@@ -19,73 +19,63 @@
 # @API Assignment Groups
 #
 # API for accessing Assignment Group and Assignment information.
+#
+# @object Assignment Group
+#     {
+#       // the id of the Assignment Group
+#       id: 1,
+#
+#       // the name of the Assignment Group
+#       name: "group2",
+#
+#       // the position of the Assignment Group
+#       position: 7,
+#
+#       // the weight of the Assignment Group
+#       group_weight: 20,
+#
+#       // the assignments in this Assignment Group
+#       // (see the Assignment API for a detailed list of fields)
+#       assingments: { ... },
+#
+#       // the grading rules that this Assignment Group has
+#       rules: {
+#         "drop_lowest" => 1,
+#         "drop_highest" => 1,
+#         "never_drop" => [33,17,24]
+#       }
+#     }
+#
 class AssignmentGroupsController < ApplicationController
   before_filter :require_context
 
-  include Api::V1::Assignment
+  include Api::V1::AssignmentGroup
 
   # @API List assignment groups
+  #
   # Returns the list of assignment groups for the current context. The returned
   # groups are sorted by their position field.
   #
-  # @argument include[] ["assignments"] Associations to include with the group.
+  # @argument include[] ["assignments","discussion_topic"] Associations to include with the group.
+  # "discussion_topic" is only valid if "assignments" is also included
   #
-  # @response_field id The unique identifier for the assignment group.
-  # @response_field name The name of the assignment group.
-  # @response_field position [Integer] The sorting order of this group in the
-  #   groups for this context.
-  #
-  # @example_response
-  #   [
-  #     {
-  #       "position": 7,
-  #       "name": "group2",
-  #       "id": 1,
-  #       "group_weight": 20,
-  #       "assignments": [...],
-  #       "rules" : {...}
-  #     },
-  #     {
-  #       "position": 10,
-  #       "name": "group1",
-  #       "id": 2,
-  #       "group_weight": 20,
-  #       "assignments": [...],
-  #       "rules" : {...}
-  #     },
-  #     {
-  #       "position": 12,
-  #       "name": "group3",
-  #       "id": 3,
-  #       "group_weight": 60,
-  #       "assignments": [...],
-  #       "rules" : {...}
-  #     }
-  #   ]
+  # @returns [Assignment Group]
   def index
     @groups = @context.assignment_groups.active
 
-    include_assignments = Array(params[:include]).include?('assignments')
-    if include_assignments
-      @groups = @groups.scoped(:include => { :assignments => :rubric })
+    params[:include] = Array(params[:include])
+    if params[:include].include? 'assignments'
+      params[:include] << "discussion_topic"
+      @groups = @groups.includes(:assignments => [:rubric, :discussion_topic])
     end
 
     if authorized_action(@context.assignment_groups.new, @current_user, :read)
-
       respond_to do |format|
         format.json {
-          hashes = @groups.map do |group|
-            hash = group.as_json(:include_root => false,
-                                 :only => %w(id name position group_weight))
-            # note that 'rules_hash' gets to_jsoned as just 'rules' because that is what GradeCalculator expects. 
-            hash['rules'] = group.rules_hash
-            if include_assignments
-              hash['assignments'] = group.assignments.active.map { |a| assignment_json(a, @current_user, session) }
-            end
-            hash
-          end
-          hashes.each { |group| group['group_weight'] = nil } unless @context.apply_group_weights?
-          render :json => hashes.to_json
+          json = @groups.map { |g|
+            assignment_group_json(g, @current_user, session, params[:include])
+          }
+          render :json => json
         }
       end
     end
@@ -108,15 +98,15 @@ class AssignmentGroupsController < ApplicationController
       end
     end
   end
-  
+
   def reorder_assignments
     @group = @context.assignment_groups.find(params[:assignment_group_id])
     if authorized_action(@group, @current_user, :update)
       order = params[:order].split(',').map{|id| id.to_i }
       group_ids = ([@group.id] + (order.empty? ? [] : @context.assignments.find_all_by_id(order).map(&:assignment_group_id))).uniq.compact
-      Assignment.update_all("assignment_group_id=#{@group.id}", :id => order, :context_id => @context.id, :context_type => @context.class.to_s)
+      Assignment.where(:id => order, :context_id => @context, :context_type => @context.class.to_s).update_all(:assignment_group_id => @group)
       @group.assignments.first.update_order(order) unless @group.assignments.empty?
-      AssignmentGroup.update_all({:updated_at => Time.now.utc}, {:id => group_ids})
+      AssignmentGroup.where(:id => group_ids).update_all(:updated_at => Time.now.utc)
       ids = @group.assignments.map(&:id)
       @context.recompute_student_scores rescue nil
       respond_to do |format|
@@ -124,7 +114,7 @@ class AssignmentGroupsController < ApplicationController
       end
     end
   end
-  
+
   def show
     @assignment_group = @context.assignment_groups.find(params[:id])
     if @assignment_group.deleted?
@@ -186,14 +176,7 @@ class AssignmentGroupsController < ApplicationController
       end
 
       if params[:move_assignments_to]
-        @new_group = @context.assignment_groups.active.find(params[:move_assignments_to])
-        order = @new_group.assignments.active.map(&:id)
-        ids_to_change = @assignment_group.assignments.active.map(&:id)
-        order += ids_to_change
-        Assignment.update_all({:assignment_group_id => @new_group.id, :updated_at => Time.now.utc}, {:id => ids_to_change}) unless ids_to_change.empty?
-        Assignment.find_by_id(order).update_order(order) unless order.empty?
-        @new_group.touch
-        @assignment_group.reload
+        @assignment_group.move_assignments_to params[:move_assignments_to]
       end
       @assignment_group.destroy
 

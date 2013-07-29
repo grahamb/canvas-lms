@@ -25,6 +25,10 @@ class Shard
     @default ||= Shard.new
   end
 
+  def self.birth
+    default
+  end
+
   def self.current
     default
   end
@@ -36,6 +40,10 @@ class Shard
 
   def self.with_each_shard(shards = nil)
     Array(yield)
+  end
+
+  def self.shard_for(object)
+    default
   end
 
   def activate
@@ -54,6 +62,18 @@ class Shard
     "default"
   end
 
+  def relative_id_for(any_id, target_shard = nil)
+    any_id
+  end
+
+  def self.global_id_for(any_id)
+    any_id
+  end
+
+  def self.relative_id_for(any_id, target_shard = nil)
+    any_id
+  end
+
   yaml_as "tag:instructure.com,2012:Shard"
 
   def self.yaml_new(klass, tag, val)
@@ -70,7 +90,15 @@ class Shard
 end
 
 ActiveRecord::Base.class_eval do
-  def shard
+  if Rails.version < "3.0"
+    class << self
+      VALID_FIND_OPTIONS << :shard
+    end
+  end
+
+  scope :shard, lambda { |shard| scoped }
+
+  def shard(shard = nil)
     Shard.default
   end
 
@@ -89,11 +117,16 @@ ActiveRecord::Base.class_eval do
 end
 
 module ActiveRecord::Associations
+  AssociationProxy.class_eval do
+    def shard
+      Shard.default
+    end
+  end
+
   %w{HasManyAssociation HasManyThroughAssociation}.each do |klass|
     const_get(klass).class_eval do
-      def with_each_shard(options = nil)
+      def with_each_shard(*shards)
         scope = self
-        scope = self.scoped(options) if options
         scope = yield(scope) if block_given?
         Array(scope)
       end

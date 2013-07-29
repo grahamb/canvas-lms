@@ -15,52 +15,71 @@
 # You should have received a copy of the GNU Affero General Public License along
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 #
-
 require [
-  'jquery'
-  'underscore'
-  'compiled/collections/UserCollection'
+  'Backbone'
+  'compiled/models/CreateUserList'
+  'compiled/models/Role'
+  'compiled/views/courses/roster/CreateUsersView'
+  'compiled/views/courses/roster/RoleSelectView'
+  'jst/courses/roster/rosterUsers'
+  'compiled/collections/RosterUserCollection'
+  'compiled/collections/RolesCollection'
   'compiled/collections/SectionCollection'
-  'compiled/views/courses/RosterView'
-], ($, _, UserCollection, SectionCollection, RosterView) ->
+  'compiled/views/InputFilterView'
+  'compiled/views/PaginatedCollectionView'
+  'compiled/views/courses/roster/RosterUserView'
+  'compiled/views/courses/roster/RosterView'
+  'compiled/views/courses/roster/ResendInvitationsView'
+  'jquery'
+], ({Model}, CreateUserList, Role, CreateUsersView, RoleSelectView, rosterUsersTemplate, RosterUserCollection, RolesCollection, SectionCollection, InputFilterView, PaginatedCollectionView, RosterUserView, RosterView, ResendInvitationsView, $) ->
 
-  # Load environment
-  course       = ENV.context_asset_string.split('_')[1]
-  url          = "/api/v1/courses/#{course}/users"
   fetchOptions =
-    include: ['avatar_url', 'enrollments', 'email']
+    include: ['avatar_url', 'enrollments', 'email', 'observed_users']
     per_page: 50
+  users = new RosterUserCollection null,
+    course_id: ENV.context_asset_string.split('_')[1]
+    sections: new SectionCollection ENV.SECTIONS
+    params: fetchOptions
+  rolesCollection = new RolesCollection(new Role attributes for attributes in ENV.ALL_ROLES)
+  course = new Model(ENV.course)
+  inputFilterView = new InputFilterView
+    collection: users
+  usersView = new PaginatedCollectionView
+    collection: users
+    itemView: RosterUserView
+    itemViewOptions:
+      course: ENV.course
+    canViewLoginIdColumn: ENV.permissions.manage_admin_users or ENV.permissions.manage_students
+    buffer: 1000
+    template: rosterUsersTemplate
+  roleSelectView = new RoleSelectView
+    collection: users
+    rolesCollection: rolesCollection
+  createUsersView = new CreateUsersView
+    collection: users
+    rolesCollection: rolesCollection
+    model: new CreateUserList
+      sections: ENV.SECTIONS
+      roles: ENV.ALL_ROLES
+      readURL: ENV.USER_LISTS_URL
+      updateURL: ENV.ENROLL_USERS_URL
+    courseModel: course
+  resendInvitationsView = new ResendInvitationsView
+    model: course
+    resendInvitationsUrl: ENV.resend_invitations_url
+    canResend: ENV.permissions.manage_students or ENV.permissions.manage_admin_users
+  @app = new RosterView
+    usersView: usersView
+    inputFilterView: inputFilterView
+    roleSelectView: roleSelectView
+    createUsersView: createUsersView
+    resendInvitationsView: resendInvitationsView
+    collection: users
+    roles: ENV.ALL_ROLES
+    permissions: ENV.permissions
+    course: ENV.course
 
-  # Cache elements
-  $studentList = $('.student_roster .user_list')
-  $teacherList = $('.teacher_roster .user_list')
-
-  # Create views
-  sections = new SectionCollection(ENV.SECTIONS)
-  students = new UserCollection
-  teachers = new UserCollection
-
-  _.each [students, teachers], (c) ->
-    c.url      = url
-    c.sections = sections
-
-  studentOptions = add: false, data: _.extend({}, fetchOptions, enrollment_type: 'student')
-  teacherOptions = add: false, data: _.extend({}, fetchOptions, enrollment_type: ['teacher', 'ta'])
-
-  studentView = new RosterView
-    collection: students
-    el: $studentList
-    fetchOptions: studentOptions
-  teacherView = new RosterView
-    collection: teachers
-    el: $teacherList
-    fetchOptions: teacherOptions
-
-  # Add events
-  students.on('reset', studentView.render, studentView)
-  teachers.on('reset', teacherView.render, teacherView)
-
-  # Fetch roster
-  studentView.$el.disableWhileLoading(students.fetch(studentOptions))
-  teacherView.$el.disableWhileLoading(teachers.fetch(teacherOptions))
+  @app.render()
+  @app.$el.appendTo $('#content')
+  users.fetch()
 

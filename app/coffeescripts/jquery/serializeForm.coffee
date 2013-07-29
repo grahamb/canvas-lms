@@ -22,7 +22,11 @@ define [
     else if el.type == 'file'
       el if $input.val()
     else if $input.hasClass 'datetime_field_enabled'
-      $input.data('date')
+      # datepicker doesn't clear the data date attribute when a date is deleted
+      if $input.val() == ""
+        null
+      else
+        $input.data('date') || null
     else if $input.data('rich_text')
       $input.editorBox('get_code', false)
     else
@@ -35,7 +39,7 @@ define [
 
 
   $.fn.serializeForm = ->
-    _.chain(this[0].elements)
+    _.chain(this[0].elements || this.find(':input'))
       .filter(isInput)
       .map(getValue)
       .value()

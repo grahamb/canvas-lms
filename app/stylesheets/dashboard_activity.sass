@@ -1,5 +1,8 @@
 @import environment
 
+#right-side .placeholder
+  height: 200px
+
 .recent-activity-header
   margin: 0
   padding: 10px
@@ -37,7 +40,7 @@
   padding: 10px 0 10px 10px
   cursor: pointer
   display: table
-  +unselectable
+  +user-select(none)
   &:hover
     background: $hover-color
     .toggle-details
@@ -107,7 +110,7 @@ $ignore-col-width: 50px
     text-decoration: none
 
 .fake-link
-  color: $link_color
+  color: $linkColor
   &:hover
     text-decoration: underline
 
@@ -118,29 +121,15 @@ $ignore-col-width: 50px
 #group_messages .stream_header .links
   display: none
 
-@mixin dashboard-stream-icon($left)
-  background-image: url(/images/dashboard_stream_icons.png)
-  background-position: $left -4px
-
+$dashboardIconSize: 32px
 .recent_activity .image-block-image
-  width: 32px
+  width: $dashboardIconSize
   margin-right: 20px
 
 .recent_activity .image-block-image i
-  display: block
-  height: 32px
-
-.announcement-icon
-  @include dashboard-stream-icon(-4px)
-
-.conversation-icon
-  @include dashboard-stream-icon(-76px)
-
-.assignment-icon
-  @include dashboard-stream-icon(-38px)
-  
-.grading-icon
-  @include dashboard-stream-icon(-112px)
-
-.discussion_topic-icon
-  @include dashboard-stream-icon(-184px)
+  height: $dashboardIconSize
+  font-size: $dashboardIconSize
+  line-height: $dashboardIconSize
+  &:before
+    color: #ccc
+    font-size: $dashboardIconSize

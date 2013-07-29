@@ -1,4 +1,5 @@
 define [
+  'compiled/util/enrollmentName'
   'vendor/handlebars.vm'
   'i18nObj'
   'jquery'
@@ -6,22 +7,28 @@ define [
   'str/htmlEscape'
   'compiled/util/semanticDateRange'
   'compiled/util/dateSelect'
+  'compiled/util/mimeClass'
   'compiled/str/convertApiUserContent'
+  'compiled/str/TextHelper'
   'jquery.instructure_date_and_time'
   'jquery.instructure_misc_helpers'
   'jquery.instructure_misc_plugins'
-], (Handlebars, I18n, $, _, htmlEscape, semanticDateRange, dateSelect, convertApiUserContent) ->
+  'translations/_core_en'
+], (enrollmentName, Handlebars, I18n, $, _, htmlEscape, semanticDateRange, dateSelect, mimeClass, convertApiUserContent, textHelper) ->
 
   Handlebars.registerHelper name, fn for name, fn of {
-    t : (key, defaultValue, options) ->
+    t : (translationKey, defaultValue, options) ->
       wrappers = {}
       options = options?.hash ? {}
+      scope = options.scope
+      delete options.scope
       for key, value of options when key.match(/^w\d+$/)
         wrappers[new Array(parseInt(key.replace('w', '')) + 2).join('*')] = value
         delete options[key]
       options.wrapper = wrappers if wrappers['*']
+      options.needsEscaping = true
       options = $.extend(options, this) unless this instanceof String or typeof this is 'string'
-      I18n.scoped(options.scope).t(key, defaultValue, options)
+      I18n.scoped(scope).t(translationKey, defaultValue, options)
 
     hiddenIf : (condition) -> " display:none; " if condition
 
@@ -45,10 +52,33 @@ define [
       return unless datetime?
       new Handlebars.SafeString "<time title='#{datetime}' datetime='#{datetime.toISOString()}' #{'pubdate' if pubdate}>#{datetime.toString(format)}</time>"
 
+    # IMPORTANT: this handlebars helper "fudges", or adjusts the time for the
+    # user's timezone chosen in their preferences using
+    # $.fudgeDateForProfileTimezone. If you use this helper, you need to use
+    # $.unfudgeDateForProfileTimezone before sending to the server!
     datetimeFormatted : (isoString) ->
       return '' unless isoString
       isoString = $.parseFromISO(isoString) unless isoString.datetime
       isoString.datetime_formatted
+
+    # Strips the time information from the datetime and accounts for the
+    # user's timezone preference.
+    dateString : (isoString) ->
+      return '' unless isoString
+      isoString = $.parseFromISO(isoString) unless isoString.datetime
+      isoString.date_string
+
+
+    # Convert the total amount of minutes into a Hours:Minutes format.
+    minutesToHM : (minutes) ->
+      hours = Math.floor(minutes / 60)
+      real_minutes = minutes % 60
+      real_min_str = (if real_minutes < 10 then "0" + real_minutes else real_minutes)
+      "#{hours}:#{real_min_str}"
+
+    # helper for easily creating icon font markup
+    addIcon : (icontype) ->
+      new Handlebars.SafeString "<i class='icon-#{htmlEscape icontype}'></i>"
 
     # helper for using date.js's custom toString method on Date objects
     dateToString : (date = '', format) ->
@@ -56,9 +86,31 @@ define [
 
     # convert a date to a string, using the given i18n format in the date.formats namespace
     tDateToString : (date = '', i18n_format) ->
-      I18n.l("date.formats.#{i18n_format}", date)
+      return '' unless date
+      I18n.l "date.formats.#{i18n_format}", date
 
-    mimeClass: (contentType) -> $.mimeClass(contentType)
+    # convert a date to a time string, using the given i18n format in the time.formats namespace
+    tTimeToString : (date = '', i18n_format) ->
+      return '' unless date
+      I18n.l "time.formats.#{i18n_format}", date
+
+    tTimeHours : (date = '') ->
+      if date.getMinutes() == 0 and date.getSeconds() == 0
+        I18n.l "time.formats.tiny_on_the_hour", date
+      else
+        I18n.l "time.formats.tiny", date
+
+    # convert an event date and time to a string using the given date and time format specifiers
+    tEventToString : (date = '', i18n_date_format = 'short', i18n_time_format = 'tiny') ->
+      I18n.t 'time.event',
+        date: I18n.l "date.formats.#{i18n_date_format}", date
+        time: I18n.l "time.formats.#{i18n_time_format}", date
+
+    # formats a date as a string, using the given i18n format string
+    strftime : (date = '', fmtstr) ->
+      I18n.strftime date, fmtstr
+
+    mimeClass: mimeClass
 
     # use this method to process any user content fields returned in api responses
     # this is important to handle object/embed tags safely, and to properly display audio/video tags
@@ -66,7 +118,11 @@ define [
       new Handlebars.SafeString convertApiUserContent(html, hash)
 
     newlinesToBreak : (string) ->
+      # Convert a null to an empty string so it doesn't blow up.
+      string ||= ''
       new Handlebars.SafeString htmlEscape(string).replace(/\n/g, "<br />")
+
+    not: (arg) -> !arg
 
     # runs block if all arguments are === to each other
     # usage:
@@ -216,5 +272,66 @@ define [
 
     toPercentage: (number) ->
       parseInt(100 * number) + "%"
+
+    toPrecision: (number, precision) ->
+      if number
+        number.toPrecision(precision)
+      else
+        ''
+
+    checkedIf: ( thing, thingToCompare, hash ) ->
+      if arguments.length == 3
+        if thing == thingToCompare
+          'checked'
+        else
+          ''
+      else
+        if thing then 'checked' else ''
+
+    selectedIf: ( thing, thingToCompare, hash ) ->
+      if arguments.length == 3
+        if thing == thingToCompare
+          'selected'
+        else
+          ''
+      else
+        if thing then 'selected' else ''
+
+    disabledIf: ( thing, hash ) ->
+      if thing then 'disabled' else ''
+
+    checkedUnless: ( thing ) ->
+      if thing then '' else 'checked'
+
+    join: ( array, separator = ',', hash ) ->
+      return '' unless array
+      array.join(separator)
+
+    ifIncludes: ( array, thing, options ) ->
+      return false unless array
+      if thing in array
+        options.fn( this )
+      else
+        options.inverse( this )
+
+    disabledIfIncludes: ( array, thing ) ->
+      return '' unless array
+      if thing in array
+        'disabled'
+      else
+        ''
+    truncate_left: ( string, max) ->
+       return textHelper.truncateText( string.split("").reverse().join(""), {max: max}).split("").reverse().join("")
+
+    truncate: ( string, max) ->
+      return textHelper.truncateText( string, {max: max})
+
+    enrollmentName: enrollmentName
+
+    titleize: (str) ->
+      return '' unless str
+      words = str.split(/[ _]+/)
+      titleizedWords = _(words).map (w) -> w[0].toUpperCase() + w.slice(1)
+      titleizedWords.join(' ')
   }
   return Handlebars

@@ -193,19 +193,33 @@ describe "grades" do
       get "/courses/#{@course.id}/grades"
 
       #check comment
-      f('.toggle_comments_link img').click
+      f('.toggle_comments_link').click
       comment_row = f('#grades_summary tr.comments')
       comment_row.should include_text('submission comment')
 
       #check tooltip text statistics
-      driver.execute_script('$("#grades_summary tr.comments span.tooltip_text").css("visibility", "visible");')
-      statistics_text = comment_row.find_element(:css, 'span.tooltip_text').text
+      driver.execute_script('$("#grades_summary tr.comments .tooltip_text").css("visibility", "visible");')
+      statistics_text = comment_row.find_element(:css, '.tooltip_text').text
       statistics_text.include?("Mean:").should be_true
       statistics_text.include?('High: 4').should be_true
       statistics_text.include?('Low: 3').should be_true
     end
 
     it "should not show assignment statistics on assignments with less than 5 submissions" do
+      get "/courses/#{@course.id}/grades"
+      f("#grade_info_#{@first_assignment.id} .tooltip").should be_nil
+    end
+
+    it "should not show assignment statistics on assignments when it is diabled on the course" do
+      # get up to a point where statistics can be shown
+      5.times do
+        s = student_in_course(:active_all => true).user
+        @first_assignment.grade_student(s, :grade => 4)
+      end
+
+      # but then prevent them at the course level
+      @course.update_attributes(:hide_distribution_graphs => true)
+
       get "/courses/#{@course.id}/grades"
       f("#grade_info_#{@first_assignment.id} .tooltip").should be_nil
     end
@@ -257,14 +271,14 @@ describe "grades" do
       f("#submission_#{@submission.assignment_id} .grade").should include_text "3"
 
       click_option("#observer_user_url", "Student 2")
-      wait_for_dom_ready
+      wait_for_ajaximations
 
       f("#observer_user_url").should be_displayed
       f("#observer_user_url option[selected]").should include_text "Student 2"
       f("#submission_#{@submission.assignment_id} .grade").should include_text "4"
 
       click_option("#observer_user_url", "Student 1")
-      wait_for_dom_ready
+      wait_for_ajaximations
 
       f("#observer_user_url").should be_displayed
       f("#observer_user_url option[selected]").should include_text "Student 1"

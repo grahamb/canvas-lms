@@ -32,21 +32,17 @@ module AuthenticationMethods
   end
 
   def load_pseudonym_from_policy
-    skip_session_save = false
-    if session.to_hash.empty? && # if there's already some session data, defer to normal auth
-        (policy_encoded = params['Policy']) &&
+    if (policy_encoded = params['Policy']) &&
         (signature = params['Signature']) &&
         signature == Base64.encode64(OpenSSL::HMAC.digest(OpenSSL::Digest::Digest.new('sha1'), Attachment.shared_secret, policy_encoded)).gsub(/\n/, '') &&
         (policy = JSON.parse(Base64.decode64(policy_encoded)) rescue nil) &&
         policy['conditions'] &&
         (credential = policy['conditions'].detect{ |cond| cond.is_a?(Hash) && cond.has_key?("pseudonym_id") })
-      skip_session_save = true
       @policy_pseudonym_id = credential['pseudonym_id']
       # so that we don't have to explicitly skip verify_authenticity_token
       params[self.class.request_forgery_protection_token] ||= form_authenticity_token
     end
     yield if block_given?
-    session.destroy if skip_session_save
   end
 
   class AccessTokenError < Exception
@@ -84,9 +80,19 @@ module AuthenticationMethods
     if !@current_pseudonym
       if @policy_pseudonym_id
         @current_pseudonym = Pseudonym.find_by_id(@policy_pseudonym_id)
-      else
-        @pseudonym_session = PseudonymSession.find
-        @current_pseudonym = @pseudonym_session && @pseudonym_session.record
+      elsif @pseudonym_session = PseudonymSession.find
+        @current_pseudonym = @pseudonym_session.record
+
+        # if the session was created before the last time the user explicitly
+        # logged out (of any session for any of their pseudonyms), invalidate
+        # this session
+        if (invalid_before = @current_pseudonym.user.last_logged_out) &&
+          (session_refreshed_at = request.env['encrypted_cookie_store.session_refreshed_at']) &&
+          session_refreshed_at < invalid_before
+
+          destroy_session
+          @current_pseudonym = nil
+        end
       end
       if params[:login_success] == '1' && !@current_pseudonym
         # they just logged in successfully, but we can't find the pseudonym now?
@@ -100,19 +106,15 @@ module AuthenticationMethods
         # just using an app session
         # this basic auth support is deprecated and marked for removal in 2012
         if @pseudonym_session.try(:used_basic_auth?) && params[:api_key].present?
-          Shard.default.activate { @developer_key = DeveloperKey.find_by_api_key(params[:api_key]) }
+          Shard.birth.activate { @developer_key = DeveloperKey.find_by_api_key(params[:api_key]) }
         end
-        @developer_key || request.get? || form_authenticity_token == form_authenticity_param || form_authenticity_token == request.headers['X-CSRF-Token'] || raise(AccessTokenError)
+        @developer_key || request.get? || !allow_forgery_protection || form_authenticity_token == form_authenticity_param || form_authenticity_token == request.headers['X-CSRF-Token'] || raise(AccessTokenError)
       end
     end
 
     if @current_user && @current_user.unavailable?
       @current_pseudonym = nil
       @current_user = nil
-    end
-
-    if api_request? && !@current_user
-      raise AccessTokenError
     end
 
     if @current_user && %w(become_user_id me become_teacher become_student).any? { |k| params.key?(k) }
@@ -173,16 +175,31 @@ module AuthenticationMethods
   private :load_user
 
   def require_user
-    unless @current_user && @current_pseudonym
+    if @current_user && @current_pseudonym
+      true
+    else
       redirect_to_login
-      return false
+      false
     end
   end
   protected :require_user
 
+  def clean_return_to(url)
+    return nil if url.blank?
+    uri = URI.parse(url)
+    return nil unless uri.path[0] == ?/
+    return "#{request.protocol}#{request.host_with_port}#{uri.path}#{uri.query && "?#{uri.query}"}#{uri.fragment && "##{uri.fragment}"}"
+  end
+
+  def return_to(url, fallback)
+    url = clean_return_to(url) || clean_return_to(fallback)
+    redirect_to url
+  end
+
   def store_location(uri=nil, overwrite=true)
     if overwrite || !session[:return_to]
-      session[:return_to] = uri || request.request_uri
+      uri ||= request.get? ? request.request_uri : request.referrer
+      session[:return_to] = clean_return_to(uri)
     end
   end
   protected :store_location
@@ -208,8 +225,29 @@ module AuthenticationMethods
         opts[:canvas_login] = 1 if params[:canvas_login]
         redirect_to login_url(opts) # should this have :no_auto => 'true' ?
       }
-      format.json { render :json => {:errors => {:message => I18n.t('lib.auth.authentication_required', "user authorization required")}}.to_json, :status => :unauthorized}
+      format.json { render_json_unauthorized }
     end
+  end
+
+  def render_json_unauthorized
+    add_www_authenticate_header if api_request? && !@current_user
+    if @current_user
+      render :json => {
+               :status => I18n.t('lib.auth.status_unauthorized', 'unauthorized'),
+               :errors => { :message => I18n.t('lib.auth.not_authorized', "user not authorized to perform that action") }
+             },
+             :status => :unauthorized
+    else
+      render :json => {
+               :status => I18n.t('lib.auth.status_unauthenticated', 'unauthenticated'),
+               :errors => { :message => I18n.t('lib.auth.authentication_required', "user authorization required") }
+             },
+             :status => :unauthorized
+    end
+  end
+
+  def add_www_authenticate_header
+    response['WWW-Authenticate'] = %{Bearer realm="canvas-lms"}
   end
 
   # Reset the session, and copy the specified keys over to the new session.
@@ -228,13 +266,19 @@ module AuthenticationMethods
 
   def initiate_delegated_login(current_host=nil)
     is_delegated = @domain_root_account.delegated_authentication? && !params[:canvas_login]
-    is_cas = @domain_root_account.cas_authentication? && is_delegated
-    is_saml = @domain_root_account.saml_authentication? && is_delegated
+    is_cas = is_delegated && @domain_root_account.cas_authentication?
+    is_saml = is_delegated && @domain_root_account.saml_authentication?
     if is_cas
       initiate_cas_login
       return true
     elsif is_saml
-      initiate_saml_login(current_host)
+
+      if @domain_root_account.auth_discovery_url
+        redirect_to @domain_root_account.auth_discovery_url
+      else
+        initiate_saml_login(current_host)
+      end
+
       return true
     end
     false
@@ -268,10 +312,5 @@ module AuthenticationMethods
 
   def delegated_auth_redirect_uri(uri)
     uri
-  end
-
-  # if true, the user is currently stepping through the oauth2 flow for the canvas api
-  def in_oauth_flow?
-    !!session[:oauth2]
   end
 end

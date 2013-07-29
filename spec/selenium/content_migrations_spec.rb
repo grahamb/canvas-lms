@@ -1,11 +1,7 @@
 require File.expand_path(File.dirname(__FILE__) + '/common')
 
 describe "external migrations" do
-  it_should_behave_like "forked server selenium tests"
-
-  append_after(:all) do
-    Setting.remove("file_storage_test_override")
-  end
+  it_should_behave_like "in-process server selenium tests"
 
   before(:each) do
     @password = "asdfasdf"
@@ -50,8 +46,8 @@ describe "external migrations" do
     ContentMigration.for_context(@course).count.should == 1
     @migration = ContentMigration.for_context(@course).first
     @migration.attachment.should_not be_nil
-    job = @migration.export_content
-    job.invoke_job
+    @migration.export_content
+    run_jobs
 
     @migration.reload
     @migration.workflow_state.should == 'exported'
@@ -129,4 +125,9 @@ describe "external migrations" do
     dt.message.should == "<p>description</p>"
   end
 
+  it "should load import page for canvas cartridge without any items to select (e.g. only questions)" do
+    run_import("canvas_cc_only_questions.zip")
+
+    @course.assessment_questions.count.should == 41
+  end
 end

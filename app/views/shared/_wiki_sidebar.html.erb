@@ -4,7 +4,7 @@
 <% load_wiki_sidebar %>
 <div id="editor_tabs" style="display: none;">
 
-  <h4><%= t('headings.insert_content', %{Insert Content into the Page}) %></h4>
+  <span class="wiki-sidebar-header"><%= t('headings.insert_content', %{Insert Content into the Page}) %></span>
   <ul>
     <% if collections.present? %>
     <li><a href="#editor_tabs_1"><%= t('tabs.collections', %{Collections}) %></a></li>
@@ -38,7 +38,7 @@
       <% if @context.respond_to?(:wiki) %>
       <a href="<%= context_url(@context, :context_wiki_page_url, '{{ page_url }}') %>" id="wiki_sidebar_wiki_url" style="display: none;">&nbsp;</a>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.wiki_pages', %{Wiki Pages}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.wiki_pages', %{Wiki Pages}) %></a></div>
         <div>
             <ul class="wiki_pages page_list">
               <% (@wiki_sidebar_data[:wiki_pages]).each do |wiki_page|  %>
@@ -48,18 +48,20 @@
               <% end %>
             </ul>
             <%= link_to t('links.new_page', "Link to a New Page"), context_url(@context, :new_context_wiki_page_url), :id => 'new_page_link', :class => "add" %>
-            <form id="new_page_drop_down" style="display:none; margin-left: 15px; margin-top: 5px;">
-              <label for="new_page_name"><%= t('new_page_name', %{What would you like to call the new page?}) %></label><br />
-              <input type="text" name="new_page_name" id="new_page_name">
-              <input type="hidden" name="new_page_url_prefix" value="<%= context_url(@context, :context_wiki_pages_url) %>" id="new_page_url_prefix" />
-              <button id="new_page_submit" class="btn btn-small" type="submit"><%= t('buttons.insert_link', %{Insert Link}) %></button>
+            <form id="new_page_drop_down" style="display:none; margin: 5px;">
+              <div class="row-fluid">
+                <label for="new_page_name"><%= t('new_page_name', %{What would you like to call the new page?}) %></label><br />
+                <input type="text" name="new_page_name" id="new_page_name" class="span12">
+                <input type="hidden" name="new_page_url_prefix" value="<%= context_url(@context, :context_wiki_pages_url) %>" id="new_page_url_prefix" />
+                <button id="new_page_submit" class="btn btn-small" type="submit"><%= t('buttons.insert_link', %{Insert Link}) %></button>
+              </div>
             </form>
         </div>
       </div>
       <% end %>
       <% if @context.respond_to?(:assignments) %>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.assignments', %{Assignments}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.assignments', %{Assignments}) %></a></div>
          <div>
             <ul class="wiki_pages page_list">
               <li title="<%= t('insert.assignments', %{Click to insert a link to this assignment}) %>"><%= link_to t('links.assignments', "Assignment List"), context_url(@context, :context_assignments_url) %></li>
@@ -72,7 +74,7 @@
       <% end %>
       <% if @context.respond_to?(:quizzes) %>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.quizzes', %{Quizzes}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.quizzes', %{Quizzes}) %></a></div>
          <div>
             <ul class="wiki_pages page_list">
               <li title="<%= t('insert.quizzes', %{Click to insert a link to this quiz}) %>"><%= link_to t('links.quizzes', "Quiz List"), context_url(@context, :context_quizzes_url) %></li>
@@ -85,7 +87,7 @@
       <% end %>
       <% if @context.respond_to?(:announcements) %>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.announcements', %{Announcements}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.announcements', %{Announcements}) %></a></div>
          <div>
             <ul class="wiki_pages page_list">
               <li title="<%= t('insert.announcements', %{Click to insert a link to this announcement}) %>"><%= link_to t('links.announcements', "Announcements List"), context_url(@context, :context_announcements_url) %></li>
@@ -99,7 +101,7 @@
 
       <% if @context.respond_to?(:discussion_topics) %>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.discussions', %{Discussions}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.discussions', %{Discussions}) %></a></div>
          <div>
             <ul class="wiki_pages page_list">
               <li title="<%= t('insert.discussions', %{Click to insert a link to this topic}) %>"><%= link_to t('links.discussions', "Discussion Index"), context_url(@context, :context_discussion_topics_url) %></li>
@@ -113,7 +115,7 @@
 
       <% if @context.respond_to?(:context_modules) %>
       <div>
-        <h5 class="header"><a href="#"><%= t('links_to.modules', %{Modules}) %></a></h5>
+        <div class="header"><a href="#"><%= t('links_to.modules', %{Modules}) %></a></div>
           <div>
             <ul class="wiki_pages page_list">
               <li title="<%= t('insert.modules', %{Click to insert a link to this module}) %>"><%= link_to t('links.modules', "Modules List"), context_url(@context, :context_context_modules_url) %></li>
@@ -126,7 +128,7 @@
       <% end %>
       
       <div>
-        <h5 class="header"><a href="#"><%= @context.is_a?(Group) ? t('links_to.nav.group', 'Group Navigation') : t('links_to.nav.course', 'Course Navigation') %></a></h5>
+        <div class="header"><a href="#"><%= @context.is_a?(Group) ? t('links_to.nav.group', 'Group Navigation') : t('links_to.nav.course', 'Course Navigation') %></a></div>
          <div>
             <ul class="wiki_pages page_list">
               <% if @context.respond_to?(:assignments) %>
@@ -294,7 +296,7 @@
       </div>
       <div class="button-container">
         <button type="button" class="btn select_button"><%= t('buttons.upload_files', %{Upload Files to Folder}) %></button>
-        <button type="button" class="btn cancel_button button-secondary"><%= t('#buttons.cancel', %{Cancel}) %></button>
+        <button type="button" class="btn cancel_button btn button-secondary"><%= t('#buttons.cancel', %{Cancel}) %></button>
       </div>
     </div>
   </div>

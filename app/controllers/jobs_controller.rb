@@ -1,5 +1,6 @@
 class JobsController < ApplicationController
-  before_filter :require_manage_jobs
+  before_filter :require_manage_jobs, :only => [:batch_update]
+  before_filter :require_view_jobs, :only => [:index, :show]
   before_filter :set_site_admin_context, :set_navigation, :only => [:index]
   POPULAR_TAG_COUNTS = 12
   LIMIT = 100
@@ -8,10 +9,14 @@ class JobsController < ApplicationController
     require_site_admin_with_permission(:manage_jobs)
   end
 
+  def require_view_jobs
+    require_site_admin_with_permission(:view_jobs)
+  end
+
   def index
     @flavor = params[:flavor] || 'current'
 
-    ActiveRecord::Base::ConnectionSpecification.with_environment(:slave) do
+    Shackles.activate(:slave) do
       respond_to do |format|
         format.html do
           @running_jobs_refresh_seconds = Setting.get('running_jobs_refresh_seconds', 2.seconds.to_s).to_f

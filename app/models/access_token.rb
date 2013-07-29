@@ -2,18 +2,26 @@ class AccessToken < ActiveRecord::Base
   attr_reader :full_token
   belongs_to :developer_key
   belongs_to :user
-  attr_accessible :user, :purpose, :expires_at, :developer_key, :regenerate
+  attr_accessible :user, :purpose, :expires_at, :developer_key, :regenerate, :scopes, :remember_access
+
+  serialize :scopes, Array
+  validate :must_only_include_valid_scopes
+
   # For user-generated tokens, purpose can be manually set.
   # For app-generated tokens, this should be generated based
   # on the scope defined in the auth process (scope has not
   # yet been implemented)
 
+  scope :active, lambda { where("expires_at IS NULL OR expires_at>?", Time.zone.now) }
+
   TOKEN_SIZE = 64
+  OAUTH2_SCOPE_NAMESPACE = '/auth/'
+  ALLOWED_SCOPES = ["#{OAUTH2_SCOPE_NAMESPACE}userinfo"]
 
   before_create :generate_token
 
   def self.authenticate(token_string)
-    token = self.first(:conditions => ["crypted_token = ? OR (token = ? AND crypted_token IS NULL)", hashed_token(token_string), token_string])
+    token = self.where(:crypted_token => hashed_token(token_string)).first
     token = nil unless token.try(:usable?)
     token
   end
@@ -48,8 +56,11 @@ class AccessToken < ActiveRecord::Base
   def token=(new_token)
     self.crypted_token = AccessToken.hashed_token(new_token)
     @full_token = new_token
-    write_attribute(:token, new_token)
     self.token_hint = new_token[0,5]
+  end
+
+  def clear_full_token!
+    @full_token = nil
   end
 
   def generate_token(overwrite=false)
@@ -78,9 +89,22 @@ class AccessToken < ActiveRecord::Base
     end
   end
 
-  # Token is a protected attribute, since it's what applications
-  # use when acting in behalf of a user.  If the user knew an app's
-  # access token, they could pretend to be the app making calls 
-  # on their behalf and cause mischief
-  def self.serialization_excludes; [:token]; end
+  #Scoped token convenience method
+  def scoped_to?(req_scopes)
+    return req_scopes.size == 0 if scopes.nil?
+
+    scopes.size == req_scopes.size &&
+      scopes.all? do |scope|
+        req_scopes.any? {|req_scope| scope[/(^|\/)#{req_scope}$/]}
+      end
+  end
+
+  def must_only_include_valid_scopes
+    return true if scopes.nil?
+    errors.add(:scopes, "must match accepted scopes") unless scopes.all? {|scope| ALLOWED_SCOPES.include?(scope)}
+  end
+
+  # It's encrypted, but end users still shouldn't see this.
+  # The hint is only returned in visible_token, if protected_token is false.
+  def self.serialization_excludes; [:crypted_token, :token_hint]; end
 end

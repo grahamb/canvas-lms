@@ -3,6 +3,7 @@ require [
   'Backbone'
   'compiled/widget/courseList'
   'compiled/helpDialog'
+  'compiled/tours'
 
   # modules that do their own thing on every page that simply need to
   # be required
@@ -25,12 +26,15 @@ require [
   # 'compiled/behaviors/repin-item'
   # 'compiled/behaviors/follow'
   'compiled/behaviors/tooltip'
+  'compiled/behaviors/instructure_inline_media_comment'
+
   # other stuff several bundles use
   'media_comments'
   'order'
   'jqueryui/effects/drop'
   'jqueryui/progressbar'
   'jqueryui/tabs'
+  'compiled/registration/incompleteRegistrationWarning'
 
   # random modules required by the js_blocks, put them all in here
   # so RequireJS doesn't try to load them before common is loaded
@@ -42,9 +46,15 @@ require [
   'vendor/jquery.pageless'
   'vendor/jquery.scrollTo'
   'compiled/badge_counts'
-], (Backbone, courseList, helpDialog) ->
+], (Backbone, courseList, helpDialog, tours) ->
   courseList.init()
   helpDialog.initTriggers()
+  tours.init()
+
+  # Make the font-based icons work in IE8,
+  # it needs to be told to redraw pseudo elements on page load
+  if INST.browser.ie8
+    $('<style>:before,:after{content:"" !important}</style>').appendTo('head').delay(1).remove()
 
   $('#skip_navigation_link').on 'click', ->
     $($(this).attr('href')).attr('tabindex', -1).focus()

@@ -1,6 +1,25 @@
 require File.expand_path(File.dirname(__FILE__) + '/helpers/gradebook2_common')
 describe "edititing grades" do
-  it_should_behave_like "gradebook2 selenium tests"
+  it_should_behave_like "in-process server selenium tests"
+
+  ASSIGNMENT_1_POINTS = "10"
+  ASSIGNMENT_2_POINTS = "5"
+  ASSIGNMENT_3_POINTS = "50"
+  ATTENDANCE_POINTS = "15"
+
+  STUDENT_NAME_1 = "student 1"
+  STUDENT_NAME_2 = "student 2"
+  STUDENT_NAME_3 = "student 3"
+  STUDENT_SORTABLE_NAME_1 = "1, student"
+  STUDENT_SORTABLE_NAME_2 = "2, student"
+  STUDENT_SORTABLE_NAME_3 = "3, student"
+  STUDENT_1_TOTAL_IGNORING_UNGRADED = "100%"
+  STUDENT_2_TOTAL_IGNORING_UNGRADED = "66.7%"
+  STUDENT_3_TOTAL_IGNORING_UNGRADED = "66.7%"
+  STUDENT_1_TOTAL_TREATING_UNGRADED_AS_ZEROS = "18.8%"
+  STUDENT_2_TOTAL_TREATING_UNGRADED_AS_ZEROS = "12.5%"
+  STUDENT_3_TOTAL_TREATING_UNGRADED_AS_ZEROS = "12.5%"
+  DEFAULT_PASSWORD = "qwerty"
 
   before (:each) do
     data_setup
@@ -25,9 +44,9 @@ describe "edititing grades" do
 
     #go back to gradebook1 and compare to make sure they match
     check_gradebook_1_totals({
-                                 @student_1.id => expected_edited_total,
-                                 @student_2.id => expected_edited_total
-                             })
+       @student_1.id => expected_edited_total,
+       @student_2.id => expected_edited_total
+     })
   end
 
   it "should update a graded quiz and have the points carry over to the quiz attempts page" do
@@ -47,7 +66,7 @@ describe "edititing grades" do
     f('#after_fudge_points_total').text.should == points.to_s
   end
 
-  it "should treat ungraded as 0's when asked, and ignore when not" do
+  it "should treat ungraded as 0s when asked, and ignore when not" do
     get "/courses/#{@course.id}/gradebook2"
     wait_for_ajaximations
 
@@ -92,8 +111,8 @@ describe "edititing grades" do
 
     edit_grade(f('#gradebook_grid [row="0"] .l3'), 'A-')
     wait_for_ajax_requests
-    f('#gradebook_grid [row="0"] .l3').text.should == 'A-'
-    @assignment.submissions.size.should == 1
+    f('#gradebook_grid [row="0"] .l3').should include_text('A-')
+    @assignment.reload.submissions.size.should == 1
     sub = @assignment.submissions.first
     sub.grade.should == 'A-'
     sub.score.should == 0.0
@@ -122,9 +141,32 @@ describe "edititing grades" do
       first_cell.find_element(:css, '.grade')
     end
     set_value(grade_input, 3)
-    first_cell.send_keys(:tab)
+    grade_input.send_keys(:tab)
     wait_for_ajax_requests
     f('#gradebook_grid [row="0"] .l1').should have_class('editable')
+  end
+
+  it "should display dropped grades correctly after editing a grade" do
+    @course.assignment_groups.first.update_attribute :rules, 'drop_lowest:1'
+    get "/courses/#{@course.id}/gradebook2"
+    wait_for_ajaximations
+
+    assignment_1_sel = '#gradebook_grid [row="0"] .l1'
+    assignment_2_sel= '#gradebook_grid [row="0"] .l2'
+    a1 = f(assignment_1_sel)
+    a2 = f(assignment_2_sel)
+    a1['class'].should include 'dropped'
+    a2['class'].should_not include 'dropped'
+
+    grade_input = keep_trying_until do
+      a2.click
+      a2.find_element(:css, '.grade')
+    end
+    set_value(grade_input, 3)
+    grade_input.send_keys(:tab)
+    wait_for_ajaximations
+    f(assignment_1_sel)['class'].should_not include 'dropped'
+    f(assignment_2_sel)['class'].should include 'dropped'
   end
 
   it "should update a grade when clicking outside of slickgrid" do

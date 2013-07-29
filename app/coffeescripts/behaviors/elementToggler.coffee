@@ -46,7 +46,7 @@ define [
 
   toggleRegion = ($region, showRegion) ->
     showRegion ?= ($region.is(':ui-dialog:hidden') || ($region.attr('aria-expanded') != 'true'))
-    $allElementsControllingRegion = $("[aria-controls=#{$region.attr('id')}]")
+    $allElementsControllingRegion = $("[aria-controls*=#{$region.attr('id')}]")
 
     # hide/un-hide .element_toggler's that point to this $region that were hidden because they have
     # the data-hide-while-target-shown attribute
@@ -70,8 +70,12 @@ define [
       else if $region.dialog('isOpen')
         $region.dialog('close')
 
-    # move focus to the region if tabbable (to make anything tabbable, just give it a tabindex)
-    $region.focus() if showRegion && $region.is(':focusable')
+    if showRegion
+      # to make things accessable:
+      # move focus to the region if tabbable (or it's first tabbable child).
+      # to make anything tabbable, just give it a tabindex
+      $firstFocusableEl = $region.find('*').andSelf().filter(':focusable').first()
+      $firstFocusableEl.focus() if $firstFocusableEl.length
 
     $allElementsControllingRegion.each updateTextToState( if showRegion then 'Shown' else 'Hidden' )
 
@@ -89,5 +93,5 @@ define [
     $parent = $this.closest('.user_content')
     $parent = $(document.body) unless $parent.length
 
-    $region = $parent.find("##{$this.attr('aria-controls')}")
+    $region = $parent.find("##{$this.attr('aria-controls').replace(/\s/g, ', #')}")
     toggleRegion($region, force) if $region.length

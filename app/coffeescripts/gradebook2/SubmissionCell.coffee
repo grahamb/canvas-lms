@@ -1,10 +1,11 @@
 define [
   'compiled/gradebook2/GRADEBOOK_TRANSLATIONS'
+  'str/htmlEscape'
   'jquery'
   'underscore'
   'compiled/gradebook2/Turnitin'
   'jquery.ajaxJSON'
-], (GRADEBOOK_TRANSLATIONS, $, _, {extractData}) ->
+], (GRADEBOOK_TRANSLATIONS, htmlEscape,$, _, {extractData}) ->
 
   class SubmissionCell
 
@@ -23,7 +24,7 @@ define [
       @$input.focus()
 
     loadValue: () ->
-      @val = @opts.item[@opts.column.field].grade || ""
+      @val = htmlEscape @opts.item[@opts.column.field].grade || ""
       @$input.val(@val)
       @$input[0].defaultValue = @val
       @$input.select()
@@ -32,7 +33,7 @@ define [
       @$input.val()
 
     applyValue: (item, state) ->
-      item[@opts.column.field].grade = state
+      item[@opts.column.field].grade = htmlEscape state
       @wrapper?.remove()
       @postValue(item, state)
       # TODO: move selection down to the next row, same column
@@ -87,10 +88,7 @@ define [
     @classesBasedOnSubmission: (submission={}, assignment={}) ->
       classes = []
       classes.push('resubmitted') if submission.grade_matches_current_submission == false
-      if assignment.due_at && submission.submitted_at
-        classes.push('late') if submission.submission_type isnt 'online_quiz' && (submission.submitted_at.timestamp > assignment.due_at.timestamp)
-        classes.push('late') if submission.submission_type is 'online_quiz' && ((submission.submitted_at.timestamp - assignment.due_at.timestamp) > 60)
-      classes.push('dropped') if submission.drop
+      classes.push('late') if submission.late
       classes.push('ungraded') if ''+assignment.submission_types is "not_graded"
       classes.push('muted') if assignment.muted
       classes.push(submission.submission_type) if submission.submission_type

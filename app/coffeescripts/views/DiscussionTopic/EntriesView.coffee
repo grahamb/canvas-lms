@@ -12,15 +12,12 @@ define [
     defaults:
       initialPage: 0
       descendants: 2
-      showMoreDescendants: 2
+      showMoreDescendants: 50
       children: 3
-
-    $body: $ 'body:first'
 
     $window: $ window
 
     initialize: ->
-      @options.showMoreDescendants ?= @options.descendants
       @collection.on 'add', @addEntry
       @model.on 'change', @hideIfFiltering
 
@@ -98,8 +95,8 @@ define [
       @goToEntry entryData
 
     scrollToEl: ($el) ->
-      @$body.scrollTo $el, 200,
-        offset: -100
+      @$window.scrollTo $el, 200,
+        offset: -150
         onAfter: =>
           # pretty blinking
           setTimeout (-> $el.addClass 'highlight' ), 200
@@ -124,10 +121,11 @@ define [
         el: @$el[0]
         collection: @collection.getPageAsCollection(page - 1, perPage: @options.children)
         descendants: @options.descendants
-        showMoreDescendants: @options.descendants
+        showMoreDescendants: @options.showMoreDescendants
         displayShowMore: no
         threaded: @options.threaded
         root: true
+        collapsed: @model.get 'collapsed'
       @collectionView.render()
       @renderPageNav()
       this

@@ -98,22 +98,17 @@ Which is you?", :count => @merge_opportunities.length %>
   <% end %>
 
   <% if @pseudonym %>
-    <% form_for :pseudonym, :url => registration_confirmation_url(@nonce, :enrollment => @enrollment.try(:uuid)), :html => {:id => "registration_confirmation_form", :class => 'form-horizontal bootstrap-form', :style => ((!@merge_opportunities.empty? || @enrollment) && !params[:register]) ? hidden : '' } do |form| %>
+    <% form_for :pseudonym, :url => registration_confirmation_url(@nonce, request.query_parameters), :html => {:id => "registration_confirmation_form", :class => 'form-horizontal bootstrap-form', :style => ((!@merge_opportunities.empty? || @enrollment) && !params[:register]) ? hidden : '' } do |form| %>
       <p class="instructions"><%= if @enrollment
           mt 'details.register_with_course', "In order to finish signing you up for the course **%{course}**, we'll need a little more information.", :course => @course.name
         else
           t 'details.register', "In order to set up your account, we'll need a little more information."
         end %></p>
-      <%= (error_messages_for :object => [@user, @pseudonym], :header_message => nil).gsub("Unique", "Login") %>
       <input type="hidden" name="register" value="1"/>
       <div class="control-group">
         <%= form.blabel :unique_id, :en => "Login", :class => 'control-label' %>
         <div class="controls" style="padding-top: 5px">
-          <% if @pseudonym.unique_id.blank? || @pseudonym.errors && @pseudonym.errors[:unique_id] %>
-            <%= form.text_field :unique_id %>
-          <% else %>
-            <%= @pseudonym.unique_id %>
-          <% end %>
+          <%= form.text_field :unique_id, :disabled => @pseudonym.unique_id.present? %>
         </div>
       </div>
       <div class="control-group">
@@ -134,6 +129,16 @@ Which is you?", :count => @merge_opportunities.length %>
           <label for="user_subscribe_to_emails">
             <%= check_box :user, :subscribe_to_emails, :checked => true %>
             <%= t "labels.subscribe_to_emails", "I want to receive information, news and tips from Instructure" %>
+          </label>
+        </div>
+      </div>
+      <% end %>
+      <% if require_terms? %>
+      <div class="control-group">
+        <div class="controls">
+          <label for="user_terms_of_use">
+            <%= check_box :user, :terms_of_use, :checked => true %>
+            <%= agree_to_terms %>
           </label>
         </div>
       </div>

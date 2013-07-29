@@ -17,31 +17,46 @@
 #
 
 class ConferencesController < ApplicationController
+  include Api::V1::Conferences
+
   before_filter :require_context
   add_crumb(proc{ t '#crumbs.conferences', "Conferences"}) { |c| c.send(:named_context_url, c.instance_variable_get("@context"), :context_conferences_url) }
   before_filter { |c| c.active_tab = "conferences" }
   before_filter :require_config
   before_filter :reject_student_view_student
+  before_filter :get_conference, :except => [:index, :create]
 
   def index
-    @conferences = @context.web_conferences.select{|c| c.grants_right?(@current_user, session, :read) }
+    @new_conferences, @concluded_conferences = @context.web_conferences.select { |conference|
+      conference.grants_right?(@current_user, session, :read)
+    }.partition { |conference|
+      conference.ended_at.nil?
+    }
+
     if authorized_action(@context, @current_user, :read)
       return unless tab_enabled?(@context.class::TAB_CONFERENCES)
       log_asset_access("conferences:#{@context.asset_string}", "conferences", "other")
-      
+
       scope = @context.users
       if @context.respond_to?(:participating_typical_users)
         scope = @context.participating_typical_users
       end
-      @users = scope.scoped({
-        :conditions => ["users.id <> ?", @current_user.id],
-        :order => User.sortable_name_order_by_clause
-      }).all.uniq
+      @users = scope.where("users.id<>?", @current_user).order(User.sortable_name_order_by_clause).all.uniq
+
+      permissions = {:permissions => {:user => @current_user, :session => session}}
+      # exposing the initial data as json embedded on page.
+      js_env(
+        current_conferences: conferences_json(@new_conferences, @context, @current_user, session),
+        concluded_conferences: conferences_json(@concluded_conferences, @context, @current_user, session),
+        default_conference: default_conference_json(@context, @current_user, session),
+        conference_type_details: conference_types_json(WebConference.conference_types),
+        users: @users.map{|u| {:id => u.id, :name => u.last_name_first}},
+      )
+
     end
   end
-  
+
   def show
-    get_conference
     if authorized_action(@conference, @current_user, :read)
       if params[:external_url]
         urls = @conference.external_url_for(params[:external_url], @current_user, params[:url_id])
@@ -54,7 +69,7 @@ class ConferencesController < ApplicationController
       log_asset_access(@conference, "conferences", "conferences")
     end
   end
-  
+
   def create
     if authorized_action(@context.web_conferences.new, @current_user, :create)
       params[:web_conference].try(:delete, :long_running)
@@ -70,7 +85,8 @@ class ConferencesController < ApplicationController
           end
           @conference.save
           format.html { redirect_to named_context_url(@context, :context_conference_url, @conference.id) }
-          format.json { render :json => WebConference.find(@conference).to_json(:permissions => {:user => @current_user, :session => session}) }
+          format.json { render :json => WebConference.find(@conference).to_json(:permissions => {:user => @current_user, :session => session},
+                                                                                :url => named_context_url(@context, :context_conference_url, @conference)) }
         else
           format.html { render :action => 'index' }
           format.json { render :json => @conference.errors.to_json, :status => :bad_request }
@@ -78,9 +94,8 @@ class ConferencesController < ApplicationController
       end
     end
   end
-  
+
   def update
-    get_conference
     if authorized_action(@conference, @current_user, :update)
       @conference.user ||= @current_user
       members = get_new_members
@@ -94,7 +109,8 @@ class ConferencesController < ApplicationController
           end
           @conference.save
           format.html { redirect_to named_context_url(@context, :context_conference_url, @conference.id) }
-          format.json { render :json => @conference.to_json(:permissions => {:user => @current_user, :session => session}) }
+          format.json { render :json => @conference.to_json(:permissions => {:user => @current_user, :session => session},
+                                                            :url => named_context_url(@context, :context_conference_url, @conference)) }
         else
           format.html { render :action => "edit" }
           format.json { render :json => @conference.errors.to_json, :status => :bad_request }
@@ -102,9 +118,8 @@ class ConferencesController < ApplicationController
       end
     end
   end
-  
+
   def join
-    get_conference
     if authorized_action(@conference, @current_user, :join)
       unless @conference.valid_config?
         flash[:error] = t(:type_disabled_error, "This type of conference is no longer enabled for this Canvas site")
@@ -115,6 +130,7 @@ class ConferencesController < ApplicationController
         @conference.add_attendee(@current_user)
         @conference.restart if @conference.ended_at && @conference.grants_right?(@current_user, session, :initiate)
         log_asset_access(@conference, "conferences", "conferences", 'participate')
+        generate_new_page_view
         if url = @conference.craft_url(@current_user, session, named_context_url(@context, :context_url, :include_host => true))
           redirect_to url
         else
@@ -129,10 +145,10 @@ class ConferencesController < ApplicationController
   end
 
   def close
-    get_conference
     if authorized_action(@conference, @current_user, :close)
       if @conference.close
-        render :json => @conference.to_json(:permissions => {:user => @current_user, :session => session})
+        render :json => @conference.to_json(:permissions => {:user => @current_user, :session => session},
+                                            :url => named_context_url(@context, :context_conference_url, @conference))
       else
         render :json => @conference.errors.to_json
       end
@@ -140,7 +156,6 @@ class ConferencesController < ApplicationController
   end
 
   def settings
-    get_conference
     if authorized_action(@conference, @current_user, :update)
       if @conference.has_advanced_settings?
         redirect_to @conference.admin_settings_url(@current_user)
@@ -152,13 +167,12 @@ class ConferencesController < ApplicationController
   end
 
   def destroy
-    get_conference
     if authorized_action(@conference, @current_user, :delete)
       @conference.destroy
       respond_to do |format|
         format.html { redirect_to named_context_url(@context, :context_conferences_url) }
         format.json { render :json => @conference.to_json }
-      end      
+      end
     end
   end
 

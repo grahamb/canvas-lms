@@ -20,6 +20,9 @@ define([
   'INST' /* INST */,
   'i18n!context_modules',
   'jquery' /* $ */,
+  'compiled/views/context_modules/context_modules' /* handles the publish/unpublish state */,
+  'compiled/util/vddTooltip',
+  'jst/assignments/VddTooltip',
   'jquery.ajaxJSON' /* ajaxJSON */,
   'jquery.instructure_date_and_time' /* parseFromISO, time_field, datetime_field */,
   'jquery.instructure_forms' /* formSubmit, fillFormData, formErrors, errorBox */,
@@ -33,7 +36,7 @@ define([
   'vendor/date' /* Date.parse */,
   'vendor/jquery.scrollTo' /* /\.scrollTo/ */,
   'jqueryui/sortable' /* /\.sortable/ */
-], function(INST, I18n, $) {
+], function(INST, I18n, $, ContextModulesView, vddTooltip, vddTooltipView) {
 
   // TODO: AMD don't export global, use as module
   window.modules = (function() {
@@ -53,7 +56,52 @@ define([
         }
         return indent;
       },
+
+      updateModulePositions: function() {
+        var ids = []
+        $("#context_modules .context_module").each(function() {
+          ids.push($(this).attr('id').substring('context_module_'.length));
+        });
+        var url = $(".reorder_modules_url").attr('href');
+        $("#context_modules").loadingImage();
+        $.ajaxJSON(url, 'POST', {order: ids.join(",")}, function(data) {
+          $("#context_modules").loadingImage('remove');
+          for(var idx in data) {
+            var module = data[idx];
+            $("#context_module_" + module.context_module.id).triggerHandler('update', module);
+          }
+        }, function(data) {
+          $("#context_modules").loadingImage('remove');
+        });
+      },
+
+      updateModuleItemPositions: function(event, ui) {
+        var $module = ui.item.parents(".context_module");
+        var url = $module.find(".reorder_items_url").attr('href');
+        $module.find(".content").loadingImage();
+        var items = [];
+        $module.find(".context_module_items .context_module_item").each(function() {
+          items.push($(this).getTemplateData({textValues: ['id']}).id);
+        });
+        $.ajaxJSON(url, 'POST', {order: items.join(",")}, function(data) {
+          $module.find(".content").loadingImage('remove');
+          if(data && data.context_module && data.context_module.content_tags) {
+            for(var idx in data.context_module.content_tags) {
+              var tag = data.context_module.content_tags[idx].content_tag;
+              $module.find("#context_module_item_" + tag.id).fillTemplateData({
+                data: {position: tag.position}
+              });
+            }
+          }
+        }, function(data) {
+          $module.find(".content").loadingImage('remove');
+          $module.find(".content").errorBox(I18n.t('errors.reorder', 'Reorder failed, please try again.'));
+        });
+      },
+
       refreshProgressions: function(show_links) {
+        if (ENV.NO_MODULE_PROGRESSIONS) return;
+
         $("#context_modules .context_module:visible").each(function() {
           var $module = $(this);
           var id = $module.find(".header").getTemplateData({textValues: ['id']});
@@ -167,15 +215,20 @@ define([
       updateAssignmentData: function() {
         $.ajaxJSON($(".assignment_info_url").attr('href'), 'GET', {}, function(data) {
           $.each(data, function(id, info) {
+            $context_module_item = $("#context_module_item_" + id);
             var data = {};
             if (info["points_possible"] != null) {
               data["points_possible_display"] = I18n.t('points_possible_short', '%{points} pts', { 'points': "<span class='points_possible_block'>" + info["points_possible"] + "</span>" });
             }
             if (info["due_date"] != null) {
               data["due_date_display"] = $.parseFromISO(info["due_date"]).date_formatted
+            } else if (info["vdd_tooltip"] != null) {
+              info['vdd_tooltip']['link_href'] = $context_module_item.find('a.title').attr('href');
+              $context_module_item.find('.due_date_display').html(vddTooltipView(info["vdd_tooltip"]));
             }
-            $("#context_module_item_" + id).fillTemplateData({data: data, htmlValues: ['points_possible_display']})
+            $context_module_item.fillTemplateData({data: data, htmlValues: ['points_possible_display']})
           });
+          vddTooltip();
         }, function() {
         });
       },
@@ -205,7 +258,7 @@ define([
           $form.attr('method', 'PUT');
           $form.find(".submit_button").text(I18n.t('buttons.update', "Update Module"));
         }
-        $form.find("#unlock_module_at").prop('checked', data.unlock_at).triggerHandler('change');
+        $form.find("#unlock_module_at").prop('checked', data.unlock_at);
         $form.find("#require_sequential_progress").attr('checked', data.require_sequential_progress == "true" || data.require_sequential_progress == "1");
         $form.find(".prerequisites_entry").showIf($("#context_modules .context_module").length > 1);
         var prerequisites = [];
@@ -275,6 +328,7 @@ define([
         }
         $item.addClass(data.type + "_" + data.id);
         $item.addClass(data.type);
+        $item.attr('aria-label', data.title);
         $item.fillTemplateData({
           data: data,
           id: 'context_module_item_' + data.id,
@@ -308,8 +362,13 @@ define([
           var data = $(this).find(".header").getTemplateData({textValues: ['name', 'id']});
           var $option = $(document.createElement('option'));
           $option.val(data.id);
+
           // data.id could come back as undefined, so calling $option.val(data.id) would return an "", which is not chainable, so $option.val(data.id).text... would die.
-          $option.text("the module, " + data.name).addClass('context_module_' + data.id).addClass('context_module_option');
+          $option.attr('role', 'option')
+                 .text("the module, " + data.name)
+                 .addClass('context_module_' + data.id)
+                 .addClass('context_module_option');
+
           $("#module_list").append($option);
         });
       },
@@ -396,61 +455,54 @@ define([
         placeholder: 'context_module_placeholder',
         forcePlaceholderSize: true,
         axis: 'y',
-        containment: "#context_modules",
-        update: function(event, ui) {
-          var $module = ui.item.parents(".context_module");
-          var url = $module.find(".reorder_items_url").attr('href');
-          $module.find(".content").loadingImage();
-          var items = [];
-          $module.find(".context_module_items .context_module_item").each(function() {
-            items.push($(this).getTemplateData({textValues: ['id']}).id);
-          });
-          $.ajaxJSON(url, 'POST', {order: items.join(",")}, function(data) {
-            $module.find(".content").loadingImage('remove');
-            if(data && data.context_module && data.context_module.content_tags) {
-              for(var idx in data.context_module.content_tags) {
-                var tag = data.context_module.content_tags[idx].content_tag;
-                $module.find("#context_module_item_" + tag.id).fillTemplateData({
-                  data: {position: tag.position}
-                });
-              }
-            }
-          }, function(data) {
-            $module.find(".content").loadingImage('remove');
-            $module.find(".content").errorBox(I18n.t('errors.reorder', 'Reorder failed, please try again.'));
-          });
-        }
+        containment: "#context_modules"
       }
     };
   })();
   
 
   modules.initModuleManagement = function() {
+    // Create the context modules backbone view to manage the publish button. 
+    var context_modules_view = new ContextModulesView({
+      el: $("#content"),
+      modules: modules
+    });
+
     $("#unlock_module_at").change(function() {
-      $(".unlock_module_at_details").showIf($(this).attr('checked'));
-      if (!$(this).attr('checked')) {
+      $this = $(this);
+      $unlock_module_at_details = $(".unlock_module_at_details");
+      $unlock_module_at_details.showIf($this.attr('checked'))
+
+      if (!$this.attr('checked')) {
         $("#context_module_unlock_at").val('').triggerHandler('change');
       }
     }).triggerHandler('change');
+
+    // -------- BINDING THE UPDATE EVENT -----------------
     $(".context_module").bind('update', function(event, data) {
       data.context_module.unlock_at = $.parseFromISO(data.context_module.unlock_at).datetime_formatted;
       var $module = $("#context_module_" + data.context_module.id);
+      $module.attr('aria-label', data.context_module.name);
       $module.find(".header").fillTemplateData({
         data: data.context_module,
         hrefValues: ['id']
       });
+
       $module.find(".footer").fillTemplateData({
         data: data.context_module,
         hrefValues: ['id']
       });
+
       $module.find(".unlock_details").showIf(data.context_module.unlock_at && Date.parse(data.context_module.unlock_at) > new Date());
       $module.find(".footer .prerequisites").empty();
+
       for(var idx in data.context_module.prerequisites) {
         var pre = data.context_module.prerequisites[idx];
         var $pre = $("#display_criterion_blank").clone(true).removeAttr('id');
         $pre.fillTemplateData({data: pre});
         $module.find(".footer .prerequisites").append($pre.show());
       }
+
       $module.find(".context_module_items .context_module_item")
         .removeClass('progression_requirement')
         .removeClass('min_score_requirement')
@@ -459,6 +511,7 @@ define([
         .removeClass('must_submit_requirement')
         .removeClass('must_contribute_requirement')
         .find('.criterion').removeClass('defined');
+
       for(var idx in data.context_module.completion_requirements) {
         var req = data.context_module.completion_requirements[idx];
         req.criterion_type = req.type;
@@ -468,9 +521,11 @@ define([
         $item.find(".criterion").addClass('defined');
         $item.addClass(req.type + "_requirement").addClass('progression_requirement');
       }
-      $module.find(".footer.prerequisites_footer").showIf(data.context_module.prerequisites && data.context_module.prerequisites.length > 0);
+
+      $module.find(".prerequisites_footer").showIf(data.context_module.prerequisites && data.context_module.prerequisites.length > 0);
       modules.refreshModuleList();
     });
+
     $("#add_context_module_form").formSubmit({
       object_name: 'context_module',
       processData: function(data) {
@@ -504,6 +559,17 @@ define([
       success: function(data, $module) {
         $module.loadingImage('remove');
         $module.attr('id', 'context_module_' + data.context_module.id);
+
+        // Set this module up with correct data attributes
+        $module.data('module-url', "/courses/" + data.context_module.context_id + "/modules/" + data.context_module.id);
+        $module.data('workflow-state', data.context_module.workflow_state);
+        if(data.context_module.workflow_state == "unpublished"){
+          $module.find('.workflow-state-action').text("Publish");
+          $module.find('.workflow-state-icon').addClass('publish-module-link')
+                                              .removeClass('unpublish-module-link');
+          $module.addClass('unpublished_module');
+        }
+
         $("#no_context_modules_message").slideUp();
         $module.triggerHandler('update', data);
       },
@@ -511,6 +577,7 @@ define([
         $module.loadingImage('remove');
       }
     });
+
     $("#add_context_module_form .add_prerequisite_link").click(function(event) {
       event.preventDefault();
       var $form = $(this).parents("#add_context_module_form");
@@ -519,20 +586,24 @@ define([
       var $pre = $form.find("#criterion_blank").clone(true).removeAttr('id');
       $select.find("." + $module.attr('id')).remove();
       var afters = [];
+
       $("#context_modules .context_module").each(function() {
         if($(this)[0] == $module[0] || afters.length > 0) {
           afters.push($(this).getTemplateData({textValues: ['id']}).id);
         }
       });
+
       for(var idx in afters) {
         $select.find(".context_module_" + afters[idx]).attr('disabled', true);
       }
+
       $pre.find(".option").empty().append($select.show());
       $form.find(".prerequisites_list .criteria_list").append($pre).show();
       $pre.slideDown();
       $form.find(".no_prerequisites_message").hide();
       $select.focus();
     });
+
     $("#add_context_module_form .add_completion_criterion_link").click(function(event) {
       event.preventDefault();
       var $form = $(this).parents("#add_context_module_form");
@@ -692,15 +763,19 @@ define([
         }
       });
     });
+
     $(".edit_module_link").live('click', function(event) {
       event.preventDefault();
       modules.editModule($(this).parents(".context_module"));
     });
+
     $(".add_module_link").live('click', function(event) {
       event.preventDefault();
       var $module = $("#context_module_blank").clone(true).attr('id', 'context_module_new');
       $("#context_modules").append($module);
-        $module.find(".context_module_items").sortable(modules.sortable_module_options);
+        var opts = modules.sortable_module_options;
+        opts['update'] = modules.updateModuleItemPositions;
+        $module.find(".context_module_items").sortable(opts);
         $("#context_modules.ui-sortable").sortable('refresh');
         $("#context_modules .context_module .context_module_items.ui-sortable").each(function() {
           $(this).sortable('refresh');
@@ -708,6 +783,7 @@ define([
         });
       modules.editModule($module);
     });
+
     $(".add_module_item_link").live('click', function(event) {
       event.preventDefault();
       var $module = $(this).closest(".context_module");
@@ -748,6 +824,7 @@ define([
       event.preventDefault();
       var $criterion = $(this).parents(".criterion");
       var prereqs = []
+
       $(this).parents(".context_module .prerequisites .criterion").each(function() {
         if($(this)[0] != $criterion[0]) {
           var data = $(this).getTemplateData({textValues: ['id', 'type']});
@@ -755,9 +832,12 @@ define([
           prereqs.push(type + "_" + data.id);
         }
       });
+
       var url = $(this).parents(".context_module").find(".edit_module_link").attr('href');
       var data = {'context_module[prerequisites]': prereqs.join(",")}
+
       $criterion.dim();
+
       $.ajaxJSON(url, 'PUT', data, function(data) {
         $("#context_module_" + data.context_module.id).triggerHandler('update', data);
       });
@@ -818,7 +898,9 @@ define([
       var next = function() {
         if($items.length > 0) {
           var $item = $items.shift();
-          $item.sortable(modules.sortable_module_options);
+          var opts = modules.sortable_module_options;
+          opts['update'] = modules.updateModuleItemPositions;
+          $item.sortable(opts);
           setTimeout(next, 10);
         }
       };
@@ -828,23 +910,7 @@ define([
         helper: 'clone',
         containment: '#context_modules_sortable_container',
         axis: 'y',
-        update: function(event, ui) {
-          var ids = []
-          $("#context_modules .context_module").each(function() {
-            ids.push($(this).attr('id').substring('context_module_'.length));
-          });
-          var url = $(".reorder_modules_url").attr('href');
-          $("#context_modules").loadingImage();
-          $.ajaxJSON(url, 'POST', {order: ids.join(",")}, function(data) {
-            $("#context_modules").loadingImage('remove');
-            for(var idx in data) {
-              var module = data[idx];
-              $("#context_module_" + module.context_module.id).triggerHandler('update', module);
-            }
-          }, function(data) {
-            $("#context_modules").loadingImage('remove');
-          });
-        }
+        update: modules.updateModulePositions
       });
       modules.refreshModuleList();
       modules.refreshed = true;
@@ -853,16 +919,20 @@ define([
 
   $(document).ready(function() {
     $(".datetime_field").datetime_field();
+
     $(".context_module").live('mouseover', function() {
       $(".context_module_hover").removeClass('context_module_hover');
       $(this).addClass('context_module_hover');
     });
-    $(".context_module_item").live('mouseover', function() {
+
+    $(".context_module_item").live('mouseover focus', function() {
       $(".context_module_item_hover").removeClass('context_module_item_hover');
       $(this).addClass('context_module_item_hover');
     });
+
     var $currentElem = null;
     var hover = function($elem) {
+
       if($elem.hasClass('context_module')) {
         $(".context_module_hover").removeClass('context_module_hover');
         $(".context_module_item_hover").removeClass('context_module_item_hover');

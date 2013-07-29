@@ -116,12 +116,6 @@ describe "profile" do
       row.should have_class("default")
     end
 
-    it "should display file uploader link on files page" do
-      get "/profile/settings"
-      expect_new_page_load { f('#left-side .files').click }
-      f('#file_swf-button').should be_displayed
-    end
-
     it "should edit full name" do
       new_user_name = 'new user name'
       get "/profile/settings"
@@ -148,7 +142,7 @@ describe "profile" do
       edit_form = click_edit
       click_option('#user_locale', 'Español')
       expect_new_page_load { submit_form(edit_form) }
-      f('.profile_table').should include_text('Nombre')
+      get_value('#user_locale').should == 'es'
     end
 
     it "should change the language even if you can't update your name" do
@@ -161,7 +155,7 @@ describe "profile" do
       edit_form.find_elements(:id, 'user_short_name').first.should be_nil
       click_option('#user_locale', 'Español')
       expect_new_page_load { submit_form(edit_form) }
-      f('.profile_table').should include_text('Nombre')
+      get_value('#user_locale').should == 'es'
     end
 
     it "should add another contact method - sms" do
@@ -239,39 +233,6 @@ describe "profile" do
       wait_for_ajaximations
       f('#access_tokens').should_not be_displayed
     end
-
-    it "should set the birthdate" do
-      get "/profile/settings"
-      edit_form = click_edit
-      click_option('#user_birthdate_1i', '1980')
-      click_option('#user_birthdate_2i', 'January')
-      click_option('#user_birthdate_3i', '31')
-      submit_form(edit_form)
-      wait_for_ajaximations
-      @user.reload
-      @user.birthdate.should == Time.utc(1980, 1, 31)
-    end
-
-    it "should not accept a partial birthdate" do
-      get "/profile/settings"
-      edit_form = click_edit
-      click_option('#user_birthdate_1i', '')
-      click_option('#user_birthdate_2i', 'February')
-      click_option('#user_birthdate_3i', '2')
-      submit_form(edit_form)
-      wait_for_ajaximations
-      edit_form.should be_displayed # not dismissed
-      @user.reload
-      @user.birthdate.should be_nil # no default year assumed
-    end
-
-    it "should not allow the birthdate to be un-set" do
-      @user.birthdate = Time.utc(1980, 1, 1)
-      @user.save!
-      get "/profile/settings"
-      edit_form = click_edit
-      lambda { click_option('#user_birthdate_1i', '') }.should raise_error(Selenium::WebDriver::Error::NoSuchElementError)
-    end
   end
 
   context "services test" do
@@ -289,64 +250,119 @@ describe "profile" do
       end
     end
   end
-end
 
-shared_examples_for "profile pictures selenium tests" do
-  it_should_behave_like "forked server selenium tests"
-
-  it "should successfully upload profile pictures" do
-    pending("intermittently fails")
-    course_with_teacher_logged_in
-    a = Account.default
-    a.enable_service('avatars')
-    a.save!
-    image_src = ''
-
-    get "/profile/settings"
-    keep_trying_until { f(".profile_pic_link") }.click
-    dialog = f("#profile_pic_dialog")
-    dialog.should be_displayed
-    dialog.find_element(:css, ".add_pic_link").click
-    filename, fullpath, data = get_file("graded.png")
-    dialog.find_element(:id, 'attachment_uploaded_data').send_keys(fullpath)
-    # Make ajax request slow down to verify transitional state
-    FilesController.before_filter { sleep 5; true }
-
-    submit_form('#add_pic_form')
-
-    new_image = dialog.find_elements(:css, ".profile_pic_list span.img img").last
-    new_image.attribute('src').should_not =~ %r{/images/thumbnails/}
-
-    FilesController.filter_chain.pop
-
-    keep_trying_until do
-      spans = ffj("#profile_pic_dialog .profile_pic_list span.img")
-      spans.last.attribute('class') =~ /selected/
-      uploaded_image = ffj("#profile_pic_dialog .profile_pic_list span.img img").last
-      image_src = uploaded_image.attribute('src')
-      image_src.should =~ %r{/images/thumbnails/}
-      new_image.attribute('alt').should =~ /graded/
+  describe "profile pictures local tests" do
+    before do
+      local_storage!
     end
-    dialog.find_element(:css, '.select_button').click
-    wait_for_ajaximations
-    keep_trying_until do
-      profile_pic = fj('.profile_pic_link img')
-      profile_pic.should have_attribue('src', image_src)
+
+    it "should successfully upload profile pictures" do
+      pending("intermittently fails")
+      course_with_teacher_logged_in
+      a = Account.default
+      a.enable_service('avatars')
+      a.save!
+      image_src = ''
+
+      get "/profile/settings"
+      keep_trying_until { f(".profile_pic_link") }.click
+      dialog = f("#profile_pic_dialog")
+      dialog.should be_displayed
+      dialog.find_element(:css, ".add_pic_link").click
+      filename, fullpath, data = get_file("graded.png")
+      dialog.find_element(:id, 'attachment_uploaded_data').send_keys(fullpath)
+      # Make ajax request slow down to verify transitional state
+      FilesController.before_filter { sleep 5; true }
+
+      submit_form('#add_pic_form')
+
+      new_image = dialog.find_elements(:css, ".profile_pic_list span.img img").last
+      new_image.attribute('src').should_not =~ %r{/images/thumbnails/}
+
+      FilesController.filter_chain.pop
+
+      keep_trying_until do
+        spans = ffj("#profile_pic_dialog .profile_pic_list span.img")
+        spans.last.attribute('class') =~ /selected/
+        uploaded_image = ffj("#profile_pic_dialog .profile_pic_list span.img img").last
+        image_src = uploaded_image.attribute('src')
+        image_src.should =~ %r{/images/thumbnails/}
+        new_image.attribute('alt').should =~ /graded/
+      end
+      dialog.find_element(:css, '.select_button').click
+      wait_for_ajaximations
+      keep_trying_until do
+        profile_pic = fj('.profile_pic_link img')
+        profile_pic.should have_attribue('src', image_src)
+      end
+      Attachment.last.folder.should == @user.profile_pics_folder
     end
-    Attachment.last.folder.should == @user.profile_pics_folder
+
+    it "should allow users to choose an avatar from their profile page" do
+      course_with_teacher_logged_in
+
+      account = Account.default
+      account.enable_service('avatars')
+      account.settings[:enable_profiles] = true
+      account.save!
+
+      get "/about/#{@user.to_param}"
+      wait_for_ajaximations
+
+      f('.profile-link').click
+
+      wait_for_ajaximations
+
+      f('#profile_pic_dialog').should_not be_nil
+    end
+  end
+
+  describe "profile pictures s3 tests" do
+    before do
+      s3_storage!(:stubs => false)
+    end
+
+    it "should successfully upload profile pictures" do
+      pending("intermittently fails")
+      course_with_teacher_logged_in
+      a = Account.default
+      a.enable_service('avatars')
+      a.save!
+      image_src = ''
+
+      get "/profile/settings"
+      keep_trying_until { f(".profile_pic_link") }.click
+      dialog = f("#profile_pic_dialog")
+      dialog.should be_displayed
+      dialog.find_element(:css, ".add_pic_link").click
+      filename, fullpath, data = get_file("graded.png")
+      dialog.find_element(:id, 'attachment_uploaded_data').send_keys(fullpath)
+      # Make ajax request slow down to verify transitional state
+      FilesController.before_filter { sleep 5; true }
+
+      submit_form('#add_pic_form')
+
+      new_image = dialog.find_elements(:css, ".profile_pic_list span.img img").last
+      new_image.attribute('src').should_not =~ %r{/images/thumbnails/}
+
+      FilesController.filter_chain.pop
+
+      keep_trying_until do
+        spans = ffj("#profile_pic_dialog .profile_pic_list span.img")
+        spans.last.attribute('class') =~ /selected/
+        uploaded_image = ffj("#profile_pic_dialog .profile_pic_list span.img img").last
+        image_src = uploaded_image.attribute('src')
+        image_src.should =~ %r{/images/thumbnails/}
+        new_image.attribute('alt').should =~ /graded/
+      end
+      dialog.find_element(:css, '.select_button').click
+      wait_for_ajaximations
+      keep_trying_until do
+        profile_pic = fj('.profile_pic_link img')
+        profile_pic.should have_attribue('src', image_src)
+      end
+      Attachment.last.folder.should == @user.profile_pics_folder
+    end
   end
 end
 
-describe "profile pictures local tests" do
-  it_should_behave_like "profile pictures selenium tests"
-  prepend_before(:each) do
-    Setting.set("file_storage_test_override", "local")
-  end
-end
-
-describe "profile pictures s3 tests" do
-  it_should_behave_like "profile pictures selenium tests"
-  prepend_before(:all) {
-    Setting.set("file_storage_test_override", "s3")
-  }
-end

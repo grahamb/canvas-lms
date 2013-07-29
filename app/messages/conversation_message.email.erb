@@ -1,5 +1,5 @@
 <% define_content :link do %>
-  http://<%= HostUrl.context_host(asset.context) %>/conversations/<%= asset.conversation_id %>
+  <%= HostUrl.protocol %>://<%= HostUrl.context_host(asset.context) %>/conversations/<%= asset.conversation_id %>
 <% end %>
 <% define_content :user_name do %>
   <%= asset.author.short_name_with_shared_contexts(user) rescue t(:unknown_user, "Unknown User") %>
@@ -10,7 +10,6 @@
 <%= t :body, "%{user_name} just sent you a message in Canvas:", :user_name => content(:user_name) %>
 
 <%= asset.body %>
-
 
 <% if asset.has_media_objects? %>
 <%= t :audio_comment, "This message includes media comments. To listen or reply, click the link below:" %>
@@ -24,6 +23,6 @@
 <%= t :attached_files, "Attached Files:" %>
 <% asset.attachments.each do |attachment| %>
 <%= attachment.display_name %> - <%= attachment.readable_size %> 
-http://<%= HostUrl.context_host(asset.context) %>/files/<%= attachment.id %>/download?verifier=<%= attachment.uuid %>
+<%= HostUrl.protocol %>://<%= HostUrl.context_host(asset.context) %>/files/<%= attachment.id %>/download?verifier=<%= attachment.uuid %>
 <% end %>
 <% end %>

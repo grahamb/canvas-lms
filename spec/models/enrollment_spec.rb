@@ -31,9 +31,7 @@ describe Enrollment do
 
   it "should have an interesting state machine" do
     enrollment_model
-    list = {}
-    list.stubs(:find_all_by_context_id_and_context_type).returns([])
-    @user.stubs(:dashboard_messages).returns(list)
+    @user.stubs(:dashboard_messages).returns(Message.where("?", false))
     @enrollment.state.should eql(:invited)
     @enrollment.accept
     @enrollment.state.should eql(:active)
@@ -48,13 +46,6 @@ describe Enrollment do
     enrollment_model
     @enrollment.accept
     @enrollment.state.should eql(:active)
-  end
-
-  it "should find students" do
-    @student_list = mock('student list')
-    @student_list.stubs(:map).returns(['student list'])
-    Enrollment.expects(:find).returns(@student_list)
-    Enrollment.students.should eql(['student list'])
   end
 
   it "should be pending if it is invited or creation_pending" do
@@ -92,6 +83,19 @@ describe Enrollment do
     e = Enrollment.new
     e.type = 'Other'
     e.readable_type.should eql('Student')
+  end
+
+  describe "sis_role" do
+    it "should return role_name if present" do
+      e = TaEnrollment.new
+      e.role_name = 'Assistant Grader'
+      e.sis_role.should == 'Assistant Grader'
+    end
+
+    it "should return the sis enrollment type otherwise" do
+      e = TaEnrollment.new
+      e.sis_role.should == 'ta'
+    end
   end
 
   it "should not allow an associated_user_id on a non-observer enrollment" do
@@ -356,7 +360,7 @@ describe Enrollment do
         @enrollment.accept.should be_true
       end
 
-      def course_section_availability_test
+      def course_section_availability_test(should_be_invited=false)
         @section = @course.course_sections.first
         @section.should_not be_nil
         @enrollment.course_section = @section
@@ -377,19 +381,29 @@ describe Enrollment do
         @enrollment.workflow_state = 'invited'
         @enrollment.save!
         @enrollment.state.should eql(:invited)
-        @enrollment.state_based_on_date.should eql(:completed)
-        @enrollment.accept.should be_false
+        if should_be_invited
+          @enrollment.state_based_on_date.should eql(:invited)
+          @enrollment.accept.should be_true
+        else
+          @enrollment.state_based_on_date.should eql(:completed)
+          @enrollment.accept.should be_false
+        end
 
         @section.start_at = 2.days.from_now
         @section.end_at = 4.days.from_now
         @section.save!
         @enrollment.save!
-        @enrollment.state.should eql(:invited)
-        @enrollment.state_based_on_date.should eql(:invited)
-        @enrollment.accept.should be_true
+        if should_be_invited
+          @enrollment.state.should eql(:active)
+          @enrollment.state_based_on_date.should eql(:active)
+        else
+          @enrollment.state.should eql(:invited)
+          @enrollment.state_based_on_date.should eql(:invited)
+          @enrollment.accept.should be_true
+        end
       end
 
-      def course_availability_test
+      def course_availability_test(state_based_state)
         @course.start_at = 2.days.ago
         @course.conclude_at = 2.days.from_now
         @course.restrict_enrollments_to_course_dates = true
@@ -409,7 +423,7 @@ describe Enrollment do
         @enrollment.state.should eql(:invited)
         @enrollment.accept
         @enrollment.reload.state.should eql(:active)
-        @enrollment.state_based_on_date.should eql(:completed)
+        @enrollment.state_based_on_date.should eql(state_based_state)
 
         @course.start_at = 2.days.from_now
         @course.conclude_at = 4.days.from_now
@@ -515,7 +529,7 @@ describe Enrollment do
         end
 
         it "should accept into the right state based on availability dates on course" do
-          course_availability_test
+          course_availability_test(:completed)
         end
 
         it "should accept into the right state based on availability dates on enrollment_term" do
@@ -550,11 +564,11 @@ describe Enrollment do
         end
 
         it "should accept into the right state based on availability dates on course_section" do
-          course_section_availability_test
+          course_section_availability_test(true)
         end
 
         it "should accept into the right state based on availability dates on course" do
-          course_availability_test
+          course_availability_test(:active)
         end
 
         it "should accept into the right state based on availability dates on enrollment_term" do
@@ -821,7 +835,7 @@ describe Enrollment do
       @term.end_at = 2.days.ago
       @term.save!
 
-      @teacher_enrollment.state_based_on_date.should == :active
+      @teacher_enrollment.state_based_on_date.should == :completed
       @student_enrollment.state_based_on_date.should == :inactive
 
       # Now after both dates
@@ -840,7 +854,7 @@ describe Enrollment do
       @term.end_at = 4.days.from_now
       @term.save!
 
-      @teacher_enrollment.state_based_on_date.should == :active
+      @teacher_enrollment.state_based_on_date.should == :inactive
       @student_enrollment.state_based_on_date.should == :inactive
 
       # Now between course and term dates, course first
@@ -1158,7 +1172,7 @@ describe Enrollment do
     it "should uncache user enrollments when rejected" do
       enable_cache do
         course_with_student(:active_course => 1)
-        User.update_all({:updated_at => 1.year.ago}, :id => @user.id)
+        User.where(:id => @user).update_all(:updated_at => 1.year.ago)
         @user.reload
         @user.cached_current_enrollments.should == [@enrollment]
         @enrollment.reject!
@@ -1169,63 +1183,80 @@ describe Enrollment do
     end
 
     context "sharding" do
-      it_should_behave_like "sharding"
+      specs_require_sharding
 
-      before do
-        Enrollment.stubs(:cross_shard_invitations?).returns(true)
-        course(:active_all => 1)
-        user
-        @user.update_attribute(:workflow_state, 'creation_pending')
-        @user.communication_channels.create!(:path => 'jt@instructure.com')
-        @enrollment1 = @course.enroll_user(@user)
-        @shard1.activate do
-          account = Account.create!
-          course(:active_all => 1, :account => account)
+      describe "limit_privileges_to_course_section!" do
+        it "should use the right shard to find the enrollments" do
+          @shard1.activate do
+            account = Account.create!
+            course_with_student(:active_all => true, :account => account)
+          end
+
+          @shard2.activate do
+            Enrollment.limit_privileges_to_course_section!(@course, @user, true)
+          end
+
+          @enrollment.reload.limit_privileges_to_course_section.should be_true
+        end
+      end
+
+      describe "cached_temporary_invitations" do
+        before do
+          Enrollment.stubs(:cross_shard_invitations?).returns(true)
+          course(:active_all => 1)
           user
           @user.update_attribute(:workflow_state, 'creation_pending')
           @user.communication_channels.create!(:path => 'jt@instructure.com')
-          @enrollment2 = @course.enroll_user(@user)
-        end
-
-        pending "working CommunicationChannel.associated_shards" unless CommunicationChannel.associated_shards('jt@instructure.com').length == 2
-      end
-
-      it "should include invitations from other shards" do
-        Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
-        @shard1.activate do
-          Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
-        end
-        @shard2.activate do
-          Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
-        end
-      end
-
-      it "should have a single cache for all shards" do
-        enable_cache do
-          @shard2.activate do
-            Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
+          @enrollment1 = @course.enroll_user(@user)
+          @shard1.activate do
+            account = Account.create!
+            course(:active_all => 1, :account => account)
+            user
+            @user.update_attribute(:workflow_state, 'creation_pending')
+            @user.communication_channels.create!(:path => 'jt@instructure.com')
+            @enrollment2 = @course.enroll_user(@user)
           end
-          Shard.expects(:with_each_shard).never
+
+          pending "working CommunicationChannel.associated_shards" unless CommunicationChannel.associated_shards('jt@instructure.com').length == 2
+        end
+
+        it "should include invitations from other shards" do
+          Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
           @shard1.activate do
             Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
           end
-          Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
-        end
-      end
-
-      it "should invalidate the cache from any shard" do
-        enable_cache do
           @shard2.activate do
             Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
-            @enrollment2.reject!
           end
-          @shard1.activate do
-            Enrollment.cached_temporary_invitations('jt@instructure.com').should == [@enrollment1]
-            @enrollment1.reject!
-          end
-          Enrollment.cached_temporary_invitations('jt@instructure.com').should == []
         end
 
+        it "should have a single cache for all shards" do
+          enable_cache do
+            @shard2.activate do
+              Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
+            end
+            Shard.expects(:with_each_shard).never
+            @shard1.activate do
+              Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
+            end
+            Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
+          end
+        end
+
+        it "should invalidate the cache from any shard" do
+          enable_cache do
+            @shard2.activate do
+              Enrollment.cached_temporary_invitations('jt@instructure.com').sort_by(&:global_id).should == [@enrollment1, @enrollment2].sort_by(&:global_id)
+              @enrollment2.reject!
+            end
+            @shard1.activate do
+              Enrollment.cached_temporary_invitations('jt@instructure.com').should == [@enrollment1]
+              @enrollment1.reject!
+            end
+            Enrollment.cached_temporary_invitations('jt@instructure.com').should == []
+          end
+
+        end
       end
     end
   end
@@ -1247,26 +1278,30 @@ describe Enrollment do
       end
     end
 
-    describe "future" do
-      it "should include future enrollments" do
+    describe "future scope" do
+      it "should include enrollments for future and unpublished courses" do
         user
         future_course  = Course.create!(:name => 'future course', :start_at => Time.now + 2.weeks,
                                         :restrict_enrollments_to_course_dates => true)
         current_course = Course.create!(:name => 'current course', :start_at => Time.now - 2.weeks)
 
+        current_unpublished_course  = Course.create!(:name => 'future course 2', :start_at => Time.now - 2.weeks)
         future_unpublished_course  = Course.create!(:name => 'future course 2', :start_at => Time.now + 2.weeks)
         future_unrestricted_course = Course.create!(:name => 'future course 3', :start_at => Time.now + 2.weeks)
 
         current_enrollment = StudentEnrollment.create!(:course => current_course, :user => @user)
         future_enrollment  = StudentEnrollment.create!(:course => future_course, :user => @user)
+        current_unpublished_enrollment = StudentEnrollment.create!(:course => current_unpublished_course, :user => @user)
         future_unpublished_enrollment = StudentEnrollment.create!(:course => future_unpublished_course, :user => @user)
         future_unrestricted_enrollment = StudentEnrollment.create!(:course => future_unrestricted_course, :user => @user)
 
         [future_course, current_course, future_unrestricted_course].each { |course| course.offer }
-        [current_enrollment, future_enrollment, future_unpublished_enrollment, future_unrestricted_enrollment].each { |e| e.accept }
+        [current_enrollment, future_enrollment, current_unpublished_enrollment, future_unpublished_enrollment, future_unrestricted_enrollment].each { |e| e.accept }
 
-        @user.enrollments.future.length.should == 1
+        @user.enrollments.future.length.should == 3
         @user.enrollments.future.should include(future_enrollment)
+        @user.enrollments.future.should include(current_unpublished_enrollment)
+        @user.enrollments.future.should include(future_unpublished_enrollment)
       end
     end
   end
@@ -1449,7 +1484,7 @@ describe Enrollment do
     it "should remove the enrollment from User#cached_current_enrollments" do
       enable_cache do
         course_with_student(:active_all => 1)
-        User.update_all({:updated_at => 1.day.ago}, :id => @user.id)
+        User.where(:id => @user).update_all(:updated_at => 1.day.ago)
         @user.reload
         @user.cached_current_enrollments.should == [ @enrollment ]
         @enrollment.conclude
@@ -1526,6 +1561,103 @@ describe Enrollment do
 
       se.accept
       pe.reload.should be_deleted
+    end
+  end
+
+  describe '#can_be_deleted_by' do
+
+    describe 'on a student enrollment' do
+      let(:enrollment) { StudentEnrollment.new }
+      let(:user) { stub(:id => 42) }
+      let(:session) { stub }
+
+      it 'is true for a user who has been granted the right' do
+        context = stub(:grants_right? => true)
+        enrollment.can_be_deleted_by(user, context, session).should be_true
+      end
+
+      it 'is false for a user without the right' do
+        context = stub(:grants_right? => false)
+        enrollment.can_be_deleted_by(user, context, session).should be_false
+      end
+
+      it 'is true for a user who can manage_admin_users' do
+        context = Object.new
+        context.stubs(:grants_right?).with(user, session, :manage_students).returns(false)
+        context.stubs(:grants_right?).with(user, session, :manage_admin_users).returns(true)
+        enrollment.can_be_deleted_by(user, context, session).should be_true
+      end
+
+      it 'is false if a user is trying to remove their own enrollment' do
+        context = Object.new
+        context.stubs(:grants_right?).with(user, session, :manage_students).returns(true)
+        context.stubs(:grants_right?).with(user, session, :manage_admin_users).returns(false)
+        context.stubs(:account => context)
+        enrollment.user_id = user.id
+        enrollment.can_be_deleted_by(user, context, session).should be_false
+      end
+    end
+  end
+
+  describe "#sis_user_id" do
+    it "should work when sis_source_id is nil" do
+      course_with_student(:active_all => 1)
+      @enrollment.sis_source_id.should be_nil
+      @enrollment.sis_user_id.should be_nil
+    end
+  end
+
+  describe "record_recent_activity" do
+    it "should record on the first call (last_activity_at is nil)" do
+      course_with_student(:active_all => 1)
+      @enrollment.last_activity_at.should be_nil
+      @enrollment.record_recent_activity
+      @enrollment.last_activity_at.should_not be_nil
+    end
+
+    it "should not record anything within the time threshold" do
+      course_with_student(:active_all => 1)
+      @enrollment.last_activity_at.should be_nil
+      now = Time.zone.now
+      @enrollment.record_recent_activity(now)
+      @enrollment.record_recent_activity(now + 5.minutes)
+      @enrollment.last_activity_at.to_s.should == now.to_s
+    end
+
+    it "should record again after the threshold is done" do
+      course_with_student(:active_all => 1)
+      @enrollment.last_activity_at.should be_nil
+      now = Time.zone.now
+      @enrollment.record_recent_activity(now)
+      @enrollment.record_recent_activity(now + 11.minutes)
+      @enrollment.last_activity_at.should.to_s == (now + 11.minutes).to_s
+    end
+  end
+
+  describe "updating cached due dates" do
+    before do
+      course_with_student
+      @assignments = [
+        assignment_model(:course => @course),
+        assignment_model(:course => @course)
+      ]
+    end
+
+    it "triggers when enrollment is created" do
+      DueDateCacher.expects(:recompute).with(@assignments.first).once
+      DueDateCacher.expects(:recompute).with(@assignments.last).once
+      @course.enrollments.create(:user => user)
+    end
+
+    it "triggers when enrollment is deleted" do
+      DueDateCacher.expects(:recompute).with(@assignments.first).once
+      DueDateCacher.expects(:recompute).with(@assignments.last).once
+      @enrollment.destroy
+    end
+
+    it "does not trigger when nothing changed" do
+      DueDateCacher.expects(:recompute).never
+      @enrollment.save
     end
   end
 end

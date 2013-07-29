@@ -35,7 +35,7 @@ describe ContentZipper do
       Zip::ZipFile.foreach(attachment.full_filename) do |f|
         if f.file?
           f.name.should =~ /some-999-_-1234-guy/
-          f.get_input_stream.read.should match(%r{This submission was a url, we're taking you to the url link now.})
+          f.get_input_stream.read.should match(%r{This submission was a url, we&#39;re taking you to the url link now.})
           f.get_input_stream.read.should be_include("http://www.instructure.com/")
         end
       end
@@ -74,6 +74,22 @@ describe ContentZipper do
       attachment.reload
       # no submissions
       attachment.workflow_state.should == 'errored'
+    end
+  end
+
+  describe "assignment_zip_filename" do
+    it "should use use course and title slugs to keep filename length down" do
+      course(:active_all => true)
+      @course.short_name = "a" * 31
+      @course.save!
+      assignment_model(:course => @course, :title => "b" * 31)
+
+      zipper = ContentZipper.new
+      filename = zipper.assignment_zip_filename(@assignment)
+      filename.should match /#{@course.short_name_slug}/
+      filename.should match /#{@assignment.title_slug}/
+      filename.should_not match /#{@course.short_name}/
+      filename.should_not match /#{@assignment.title}/
     end
   end
 
@@ -178,6 +194,15 @@ describe ContentZipper do
       names.should == ['otherfile.png']
     end
   end
+  
+  describe "mark_successful!" do
+    it "sets an instance variable representing a successful zipping" do
+      zipper = ContentZipper.new
+      zipper.should_not be_zipped_successfully
+      zipper.mark_successful!
+      zipper.should be_zipped_successfully
+    end
+  end
 
   describe "zip_eportfolio" do
     it "should sanitize the zip file name" do
@@ -192,6 +217,71 @@ describe ContentZipper do
       Dir.expects(:mktmpdir).once.yields('/tmp')
       Zip::ZipFile.expects(:open).once.with('/tmp/etcpasswd.zip', Zip::ZipFile::CREATE)
       ContentZipper.process_attachment(attachment, user)
+    end
+  end
+
+  describe "mark_attachment_as_zipping!" do
+
+    it "marks the workflow state as zipping and updates scribd attempts" do
+      attachment = Attachment.new display_name: 'jenkins.ppt'
+      attachment.scribd_attempts = 0
+      attachment.expects(:save!).once
+      ContentZipper.new.mark_attachment_as_zipping!(attachment)
+      attachment.should be_zipping
+      attachment.scribd_attempts.should == 1
+    end
+  end
+
+  describe "update_progress" do
+
+    it "updates the zip attachment's state to a percentage and save!s it" do
+      attachment = Attachment.new display_name: "donuts.jpg"
+      attachment.expects(:save!).once
+      ContentZipper.new.update_progress(attachment,5,10)
+      attachment.file_state.should == 60 # accounts for zero-indexed arrays
+    end
+  end
+
+  describe "complete_attachment" do
+
+    before { @attachment = Attachment.new :display_name => "I <3 testing.png" }
+    context "when attachment wasn't zipped successfully" do
+      it "moves the zip attachment into an error state and save!s it" do
+        @attachment.expects(:save!).once
+        ContentZipper.new.complete_attachment!(@attachment,"hello")
+        @attachment.workflow_state.should == 'errored'
+      end
+    end
+
+    context "attachment was zipped successfully" do
+      it "creates uploaded data for the assignment and marks it as available" do
+        @attachment.expects(:save!).once
+        zip_name = "submissions.zip"
+        data = "just some stub data"
+        ActionController::TestUploadedFile.expects(:new).
+          with(zip_name, 'application/zip').returns data
+        @attachment.expects(:uploaded_data=).with data
+        zipper = ContentZipper.new
+        zipper.mark_successful!
+        zipper.complete_attachment!(@attachment,zip_name)
+        @attachment.should be_zipped
+        @attachment.file_state.should == 'available'
+      end
+    end
+  end
+
+  describe "zip_quiz" do
+    it "delegates to a QuizSubmissionZipper" do
+      attachment = Attachment.new(:display_name => 'download.zip')
+      quiz = Quiz.new(:context => @course)
+      zipper_stub = stub
+      zipper_stub.expects(:zip!).once
+      attachment.context = quiz
+      QuizSubmissionZipper.expects(:new).with(
+        quiz: quiz,
+        zip_attachment: attachment
+      ).returns zipper_stub
+      ContentZipper.process_attachment(attachment,quiz)
     end
   end
 end

@@ -79,6 +79,7 @@ describe "courses" do
       replace_content(quota_input, "10")
       submit_form(form)
       keep_trying_until { f(".loading_image_holder").nil? rescue true }
+      form = f("#course_form")
       form.find_element(:css, ".course_info.storage_quota_mb").text.should == "10"
 
       # then try just saving it (without resetting it)
@@ -88,6 +89,7 @@ describe "courses" do
       form.find_element(:css, ".edit_course_link").click
       submit_form(form)
       keep_trying_until { f(".loading_image_holder").nil? rescue true }
+      form = f("#course_form")
       form.find_element(:css, ".course_info.storage_quota_mb").text.should == "10"
 
       # then make sure it's right after a reload
@@ -98,7 +100,7 @@ describe "courses" do
       @course.storage_quota.should == 10.megabytes
     end
 
-    it "should redirect to the gradebook when switching courses when viewing a student's grades" do
+    it "should redirect to the gradebook when switching courses when viewing a students grades" do
       teacher = user_with_pseudonym(:username => 'teacher@example.com', :active_all => 1)
       student = user_with_pseudonym(:username => 'student@example.com', :active_all => 1)
       course1 = course_with_teacher_logged_in(:user => teacher, :active_all => 1).course
@@ -122,27 +124,17 @@ describe "courses" do
       course_with_teacher_logged_in
 
       # Setup the course with > 50 users (to test scrolling)
-      100.times do |n|
-        @course.enroll_student(user).accept!
+      60.times do |n|
+        @course.enroll_student(user)
       end
+
+      @course.enroll_user(user, 'TaEnrollment')
 
       # Test that the page loads properly the first time.
       get "/courses/#{@course.id}/users"
       wait_for_ajaximations
       ff('.ui-state-error').length.should == 0
-      ff('.student_roster .user').length.should == 50
-      ff('.teacher_roster .user').length.should == 1
-
-      # Test the infinite scroll.
-      driver.execute_script <<-END
-        var $wrapper = $('.student_roster .fill_height_div'),
-            $list    = $('.student_list'),
-            scroll   = $list.height() - $wrapper.height();
-
-        $wrapper.scrollTo(scroll);
-      END
-      wait_for_ajaximations
-      ff('.student_roster li').length.should == 100
+      ff('.roster .rosterUser').length.should == 50
     end
 
     it "should only show users that a user has permissions to view" do
@@ -161,10 +153,10 @@ describe "courses" do
       # Test that only users in the approved section are displayed.
       get "/courses/#{@course.id}/users"
       wait_for_ajaximations
-      ff('.student_roster .user').length.should == 1
+      ff('.roster .rosterUser').length.should == 2
     end
 
-    it "should display users' section name" do
+    it "should display users section name" do
       course_with_teacher_logged_in(:active_all => true)
       user1, user2 = [user, user]
       section1 = @course.course_sections.create!(:name => 'One')
@@ -180,8 +172,38 @@ describe "courses" do
 
       get "/courses/#{@course.id}/users"
       wait_for_ajaximations
-      sections = ff('.student_roster .section')
-      sections.map(&:text).sort.should == %w{One One Two}
+      sections = ff('.roster .section')
+      sections.map(&:text).sort.should == ["One", "One", "Two", "Unnamed Course", "Unnamed Course"]
+    end
+
+    it "should display users section name properly when separated by custom roles" do
+      course_with_teacher_logged_in(:active_all => true)
+      user1 = user
+      section1 = @course.course_sections.create!(:name => 'One')
+      section2 = @course.course_sections.create!(:name => 'Two')
+
+      role1 = @course.account.roles.build :name => "CustomStudent1"
+      role1.base_role_type = "StudentEnrollment"
+      role1.save!
+      role2 = @course.account.roles.build :name => "CustomStudent2"
+      role2.base_role_type = "StudentEnrollment"
+      role2.save!
+
+      @course.enroll_user(user1, "StudentEnrollment", :section => section1, :role_name => role1.name).accept!
+      @course.enroll_user(user1, "StudentEnrollment", :section => section2, :role_name => role2.name, :allow_multiple_enrollments => true).accept!
+      roles_to_sections = {'CustomStudent1' => 'One', 'CustomStudent2' => 'Two'}
+
+      get "/courses/#{@course.id}/users"
+
+      wait_for_ajaximations
+
+      role_wrappers = ff('.student_roster .users-wrapper')
+      role_wrappers.each do |rw|
+        role_name = ff('.h3', rw).first.text
+        sections = ff('.section', rw)
+        sections.count.should == 1
+        roles_to_sections[role_name].should == sections.first.text
+      end
     end
   end
 
@@ -198,6 +220,8 @@ describe "courses" do
     before (:each) do
       course_with_teacher(:active_all => true, :name => 'discussion course')
       @student = user_with_pseudonym(:active_user => true, :username => 'student@example.com', :name => 'student@example.com', :password => 'asdfasdf')
+      Account.default.settings[:allow_invitation_previews] = true
+      Account.default.save!
     end
 
     it "should accept the course invitation" do

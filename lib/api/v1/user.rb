@@ -85,9 +85,19 @@ module Api::V1::User
   #   /users/Y
   # keep in mind the latter form is only accessible if the user has a public profile
   # (or if the api caller is an admin)
+  #
+  # if parent_context is :profile, the html_url will always be the user's
+  # public profile url, regardless of @current_user permissions
   def user_display_json(user, parent_context = nil)
     return {} unless user
-    participant_url = parent_context ? polymorphic_url([parent_context, user]) : user_url(user)
+    participant_url = case parent_context
+    when :profile
+      user_profile_url(user)
+    when nil, false
+      user_url(user)
+    else
+      polymorphic_url([parent_context, user])
+    end
     { :id => user.id, :display_name => user.short_name, :avatar_image_url => avatar_url_for_user(user, blank_fallback), :html_url => participant_url }
   end
 
@@ -124,13 +134,16 @@ module Api::V1::User
   def enrollment_json(enrollment, user, session, includes = [])
     api_json(enrollment, user, session, :only => API_ENROLLMENT_JSON_OPTS).tap do |json|
       json[:enrollment_state] = json.delete('workflow_state')
+      json[:role] = enrollment.role
+      json[:sis_source_id] = enrollment.sis_source_id # SFU MOD - CANVAS-224
+      json[:sis_batch_id] = enrollment.sis_batch_id
       if enrollment.student?
         json[:grades] = {
           :html_url => course_student_grades_url(enrollment.course_id, enrollment.user_id),
         }
 
         if has_grade_permissions?(user, enrollment)
-          %w{current_score final_score}.each do |method|
+          %w{current_score final_score current_grade final_grade}.each do |method|
             json[:grades][method.to_sym] = enrollment.send("computed_#{method}")
           end
         end
@@ -143,6 +156,9 @@ module Api::V1::User
         lockedbysis &&= !enrollment.course.account.grants_right?(@current_user, session, :manage_account_settings)
         json[:locked] = lockedbysis
       end
+      if includes.include?('observed_users') && enrollment.observer? && enrollment.associated_user
+        json[:observed_user] = user_json(enrollment.associated_user, user, session, user_includes, @context, enrollment.associated_user.not_ended_enrollments.all_student.where(:course_id => enrollment.course_id))
+      end
     end
   end
 
@@ -150,7 +166,7 @@ module Api::V1::User
   def has_grade_permissions?(user, enrollment)
     course = enrollment.course
 
-    (user.id == enrollment.user_id && !course.settings[:hide_final_grade]) ||
+    (user.id == enrollment.user_id && !course.hide_final_grades?) ||
      course.grants_rights?(user, :manage_grades, :view_all_grades).values.any?
   end
 end
