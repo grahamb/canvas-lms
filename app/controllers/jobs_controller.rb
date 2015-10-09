@@ -23,7 +23,7 @@ class JobsController < ApplicationController
           @job_tags_refresh_seconds  = Setting.get('job_tags_refresh_seconds', 10.seconds.to_s).to_f
         end
 
-        format.js do
+        format.json do
           case params[:only]
           when 'running'
             render :json => {running: Delayed::Job.running_jobs.map{ |j| j.as_json(include_root: false, except: [:handler, :last_error]) }}
